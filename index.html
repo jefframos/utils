@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Utility Apps</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&display=swap" rel="stylesheet">
+    <script type="module" src="https://esm.run/@material/web/button/filled-tonal-button.js"></script>
+    <script type="module" src="https://esm.run/@material/web/chips/assist-chip.js"></script>
+    <style>
+        :root {
+            --md-sys-color-primary: #6a4c00;
+            --md-sys-color-on-primary: #ffffff;
+            --md-sys-color-primary-container: #ffdea6;
+            --md-sys-color-on-primary-container: #221b00;
+            --md-sys-color-secondary: #5c5f42;
+            --md-sys-color-secondary-container: #e0e4bd;
+            --md-sys-color-surface: #fdf8f1;
+            --md-sys-color-surface-variant: #ebe1cf;
+            --md-sys-color-on-surface: #1f1b13;
+            --md-sys-color-outline-variant: #cec5b4;
+            --ink: #1f1b13;
+            --muted: #5e5a50;
+            --hero-grad-a: #fff2c6;
+            --hero-grad-b: #c7e9da;
+            --hero-grad-c: #e4d7ff;
+            --card-glass: rgba(255, 255, 255, 0.74);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Manrope", "Segoe UI", Tahoma, sans-serif;
+            color: var(--ink);
+            background:
+                radial-gradient(55% 45% at 14% 6%, var(--hero-grad-a) 0%, transparent 70%),
+                radial-gradient(45% 38% at 88% 22%, var(--hero-grad-b) 0%, transparent 70%),
+                linear-gradient(145deg, var(--hero-grad-c), #f5f7ec);
+        }
+
+        .wrap {
+            width: min(1080px, 92vw);
+            margin: 0 auto;
+            padding: 2.6rem 0 4.2rem;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: clamp(2.1rem, 5vw, 3.5rem);
+            line-height: 1.04;
+            letter-spacing: -0.02em;
+            font-weight: 800;
+        }
+
+        .subtitle {
+            margin-top: 0.65rem;
+            color: var(--muted);
+            max-width: 60ch;
+            font-size: 1.02rem;
+        }
+
+        .hero {
+            border: 1px solid rgba(106, 76, 0, 0.12);
+            border-radius: 28px;
+            padding: 1.4rem;
+            background: linear-gradient(150deg, rgba(255, 255, 255, 0.66), rgba(255, 255, 255, 0.46));
+            backdrop-filter: blur(8px);
+            box-shadow: 0 14px 34px rgba(35, 28, 11, 0.1);
+        }
+
+        .hero-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.7rem;
+            margin-top: 1rem;
+            align-items: center;
+        }
+
+        .hero-meta md-assist-chip {
+            --md-assist-chip-container-shape: 12px;
+        }
+
+        .app-grid {
+            list-style: none;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.05rem;
+            margin: 1.4rem 0 0;
+            padding: 0;
+        }
+
+        .app-item {
+            animation: reveal 420ms ease both;
+        }
+
+        .app-item:nth-child(2) {
+            animation-delay: 70ms;
+        }
+
+        .app-item:nth-child(3) {
+            animation-delay: 140ms;
+        }
+
+        .app-surface {
+            border: 1px solid rgba(55, 45, 13, 0.11);
+            border-radius: 22px;
+            min-height: 230px;
+            padding: 1.05rem;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            background: var(--card-glass);
+            backdrop-filter: blur(6px);
+            box-shadow: 0 8px 30px rgba(45, 36, 14, 0.09);
+            transition: transform 220ms ease, box-shadow 220ms ease;
+        }
+
+        .app-surface:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 14px 28px rgba(45, 36, 14, 0.13);
+        }
+
+        .app-meta h2 {
+            margin: 0;
+            font-size: 1.24rem;
+            line-height: 1.2;
+            letter-spacing: -0.01em;
+        }
+
+        .app-meta p {
+            margin: 0.7rem 0 0.9rem;
+            min-height: 2.8em;
+            color: var(--muted);
+        }
+
+        .actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.8rem;
+        }
+
+        .app-path {
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .app-link {
+            text-decoration: none;
+        }
+
+        .app-link md-filled-tonal-button {
+            --md-filled-tonal-button-container-shape: 12px;
+            --md-filled-tonal-button-label-text-font: "Manrope", "Segoe UI", Tahoma, sans-serif;
+            --md-filled-tonal-button-label-text-weight: 700;
+        }
+
+        .empty {
+            margin-top: 1.2rem;
+            padding: 1rem 1.1rem;
+            border-radius: 14px;
+            border: 1px dashed rgba(41, 31, 7, 0.2);
+            background: rgba(255, 255, 255, 0.63);
+        }
+
+        @keyframes reveal {
+            from {
+                opacity: 0;
+                transform: translateY(16px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @media (max-width: 700px) {
+            .wrap {
+                padding-top: 1.4rem;
+            }
+
+            .hero {
+                border-radius: 20px;
+                padding: 1rem;
+            }
+
+            .app-surface {
+                min-height: 205px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <main class="wrap">
+        <section class="hero">
+            <h1>Utility Hub</h1>
+            <p class="subtitle">
+                Material-powered menu generated from folders in <code>apps/</code>.
+            </p>
+            <div class="hero-meta">
+                <md-assist-chip label="Material Web"></md-assist-chip>
+                <md-assist-chip label="Auto-generated"></md-assist-chip>
+                <md-assist-chip label="GitHub Pages-ready"></md-assist-chip>
+            </div>
+        </section>
+        <ul class="app-grid">
+  <li class="app-item">
+    <article class="app-surface">
+      <div class="app-meta">
+        <h2>My Train</h2>
+        <p>Save commute stations and see next outbound and return trains in England</p>
+      </div>
+      <div class="actions">
+        <md-assist-chip class="app-path" label="apps/my-train/"></md-assist-chip>
+        <a href="apps/my-train/" class="app-link">
+          <md-filled-tonal-button>Open App</md-filled-tonal-button>
+        </a>
+      </div>
+    </article>
+  </li>
+  <li class="app-item">
+    <article class="app-surface">
+      <div class="app-meta">
+        <h2>Template App</h2>
+        <p>Starter template to copy for new utility apps</p>
+      </div>
+      <div class="actions">
+        <md-assist-chip class="app-path" label="apps/template-app/"></md-assist-chip>
+        <a href="apps/template-app/" class="app-link">
+          <md-filled-tonal-button>Open App</md-filled-tonal-button>
+        </a>
+      </div>
+    </article>
+  </li>
+</ul>
+    </main>
+</body>
+
+</html>

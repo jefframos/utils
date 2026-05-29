@@ -1,0 +1,812 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>My Train - England Rail Tracker</title>
+    <style>
+        :root {
+            --bg-top: #f8f3e8;
+            --bg-mid: #d8eede;
+            --bg-bottom: #dce7f7;
+            --ink: #1c262a;
+            --muted: #51636e;
+            --accent: #0b7285;
+            --accent-soft: #daf4fa;
+            --success-soft: #e5f8ea;
+            --card: rgba(255, 255, 255, 0.86);
+            --line: rgba(28, 38, 42, 0.14);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at 12% 12%, rgba(255, 255, 255, 0.58), transparent 42%),
+                linear-gradient(160deg, var(--bg-top), var(--bg-mid), var(--bg-bottom));
+            padding: 1.3rem;
+        }
+
+        .app {
+            width: min(980px, 100%);
+            margin: 0 auto;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: clamp(1.8rem, 3.5vw, 2.5rem);
+            letter-spacing: 0.01em;
+        }
+
+        .subtitle {
+            margin: 0.6rem 0 0;
+            color: var(--muted);
+        }
+
+        .panel {
+            margin-top: 1rem;
+            border-radius: 16px;
+            border: 1px solid var(--line);
+            background: var(--card);
+            backdrop-filter: blur(5px);
+            padding: 1rem;
+            box-shadow: 0 8px 24px rgba(21, 30, 36, 0.08);
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 0.85rem;
+            align-items: end;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.3rem;
+            font-weight: 600;
+            font-size: 0.92rem;
+        }
+
+        input,
+        select,
+        button {
+            width: 100%;
+            border-radius: 10px;
+            border: 1px solid var(--line);
+            padding: 0.62rem 0.7rem;
+            font: inherit;
+            color: inherit;
+            background: #fff;
+        }
+
+        button {
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 160ms ease, box-shadow 160ms ease;
+            background: linear-gradient(135deg, #f8fdff, #eefaf3);
+        }
+
+        button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 7px 14px rgba(26, 39, 45, 0.12);
+        }
+
+        .button-primary {
+            border-color: rgba(11, 114, 133, 0.35);
+            background: linear-gradient(140deg, var(--accent-soft), #dff7e6);
+        }
+
+        .button-success {
+            border-color: rgba(43, 138, 62, 0.35);
+            background: linear-gradient(140deg, var(--success-soft), #eefae8);
+        }
+
+        .actions {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            margin-top: 0.9rem;
+        }
+
+        .actions button {
+            flex: 1 1 150px;
+        }
+
+        .quick-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.55rem;
+            margin-top: 0.9rem;
+        }
+
+        .quick-row button {
+            width: auto;
+            padding: 0.48rem 0.75rem;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            background: rgba(255, 255, 255, 0.94);
+        }
+
+        .status {
+            margin-top: 0.8rem;
+            color: var(--muted);
+            font-size: 0.95rem;
+            min-height: 1.3em;
+        }
+
+        .boards {
+            margin-top: 1rem;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 0.9rem;
+        }
+
+        .board {
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.87);
+            overflow: hidden;
+        }
+
+        .board h2 {
+            margin: 0;
+            padding: 0.8rem 0.9rem;
+            font-size: 1.02rem;
+            background: rgba(11, 114, 133, 0.09);
+            border-bottom: 1px solid var(--line);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 0.58rem 0.72rem;
+            border-bottom: 1px solid rgba(80, 98, 109, 0.12);
+            font-size: 0.92rem;
+        }
+
+        th {
+            color: var(--muted);
+            font-weight: 600;
+            background: rgba(245, 250, 251, 0.85);
+        }
+
+        .meta {
+            margin-top: 0.9rem;
+            display: flex;
+            justify-content: space-between;
+            gap: 0.8rem;
+            flex-wrap: wrap;
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        .hint {
+            margin-top: 0.9rem;
+            padding: 0.75rem;
+            border-radius: 11px;
+            border: 1px dashed rgba(80, 98, 109, 0.35);
+            background: rgba(255, 255, 255, 0.58);
+            color: #3a4e58;
+            font-size: 0.9rem;
+        }
+
+        .credentials-note {
+            margin-top: 0.4rem;
+            font-size: 0.85rem;
+            color: var(--muted);
+        }
+
+        a {
+            color: var(--accent);
+        }
+
+        .top-links {
+            margin-top: 1rem;
+        }
+
+        @media (max-width: 650px) {
+            body {
+                padding: 0.75rem;
+            }
+
+            .panel {
+                padding: 0.8rem;
+            }
+
+            th,
+            td {
+                font-size: 0.86rem;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <main class="app">
+        <h1>My Train</h1>
+        <p class="subtitle">Home-first rail tracker: pick your home station once, type a city or station, and check both
+            directions quickly.</p>
+
+        <section class="panel" aria-label="Route settings">
+            <div class="form-grid">
+                <div>
+                    <label for="homeStation">Home station</label>
+                    <select id="homeStation"></select>
+                </div>
+                <div>
+                    <label for="destinationInput">Destination station or city</label>
+                    <input id="destinationInput" list="destinationList"
+                        placeholder="e.g. London, Manchester Piccadilly, CBG" />
+                    <datalist id="destinationList"></datalist>
+                </div>
+                <div>
+                    <label for="destinationStationSelect">Station dropdown</label>
+                    <select id="destinationStationSelect"></select>
+                </div>
+            </div>
+            <div class="actions">
+                <button id="homeBtn" class="button-primary" type="button">Home Route</button>
+                <button id="swapBtn" class="button-success" type="button">Swap Direction</button>
+                <button id="locateBtn" type="button">Set Home by GPS</button>
+                <button id="refreshBtn" type="button">Refresh</button>
+            </div>
+            <div class="quick-row">
+                <button type="button" class="quick-destination" data-destination="London">London</button>
+                <button type="button" class="quick-destination" data-destination="Cambridge">Cambridge</button>
+                <button type="button" class="quick-destination" data-destination="Manchester">Manchester</button>
+                <button type="button" class="quick-destination" data-destination="Birmingham">Birmingham</button>
+            </div>
+            <p id="status" class="status"></p>
+            <div class="hint">
+                Live departures use National Rail's public live-departures pages, so there is no API quota to hit.
+            </div>
+        </section>
+
+        <section class="boards" aria-label="Departures">
+            <article class="board">
+                <h2 id="outboundTitle">Next trains: outbound</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Due</th>
+                            <th>Expected</th>
+                            <th>Platform</th>
+                            <th>Operator</th>
+                        </tr>
+                    </thead>
+                    <tbody id="outboundBody"></tbody>
+                </table>
+            </article>
+
+            <article class="board">
+                <h2 id="returnTitle">Next trains: return</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Due</th>
+                            <th>Expected</th>
+                            <th>Platform</th>
+                            <th>Operator</th>
+                        </tr>
+                    </thead>
+                    <tbody id="returnBody"></tbody>
+                </table>
+            </article>
+        </section>
+
+        <div class="meta">
+            <span id="lastUpdated">Last updated: not yet</span>
+            <span>Data source: UK rail departures via TransportAPI</span>
+        </div>
+
+        <p class="top-links"><a href="../../index.html">Back to all apps</a></p>
+    </main>
+
+    <script>
+        const STORAGE_KEY = "myTrainPreferencesV1";
+        const MAX_ROWS = 6;
+        const CITY_TO_STATIONS = {
+            london: ["KGX", "EUS", "PAD", "VIC", "WAT", "LST", "STP"],
+            cambridge: ["CBG", "CMB"],
+            manchester: ["MAN"],
+            birmingham: ["BHM", "BHI"],
+            leeds: ["LDS"],
+            liverpool: ["LIV"],
+            brighton: ["BTN"],
+            york: ["YRK"],
+            oxford: ["OXF"],
+            bristol: ["BRS"],
+            southampton: ["SOU"],
+            plymouth: ["PLY"],
+            edinburgh: ["EDB"],
+            glasgow: ["GLC"],
+            bishopsstortford: ["BIS"],
+            bishopsstotford: ["BIS"],
+            bsh: ["BIS"]
+        };
+
+        const STATIONS = [
+            { code: "KGX", name: "London Kings Cross", lat: 51.5308, lon: -0.1238 },
+            { code: "EUS", name: "London Euston", lat: 51.5282, lon: -0.1337 },
+            { code: "PAD", name: "London Paddington", lat: 51.5154, lon: -0.1755 },
+            { code: "VIC", name: "London Victoria", lat: 51.4963, lon: -0.144 },
+            { code: "WAT", name: "London Waterloo", lat: 51.5033, lon: -0.1147 },
+            { code: "LST", name: "London Liverpool Street", lat: 51.5178, lon: -0.0824 },
+            { code: "STP", name: "London St Pancras Intl", lat: 51.5319, lon: -0.1263 },
+            { code: "BHM", name: "Birmingham New Street", lat: 52.4776, lon: -1.899 },
+            { code: "BHI", name: "Birmingham International", lat: 52.4528, lon: -1.7305 },
+            { code: "MAN", name: "Manchester Piccadilly", lat: 53.4762, lon: -2.2283 },
+            { code: "LDS", name: "Leeds", lat: 53.7956, lon: -1.5476 },
+            { code: "YRK", name: "York", lat: 53.9584, lon: -1.093 },
+            { code: "NCL", name: "Newcastle", lat: 54.9683, lon: -1.6178 },
+            { code: "EDB", name: "Edinburgh", lat: 55.9523, lon: -3.189 },
+            { code: "GLC", name: "Glasgow Central", lat: 55.859, lon: -4.2576 },
+            { code: "LIV", name: "Liverpool Lime Street", lat: 53.4085, lon: -2.9778 },
+            { code: "BTN", name: "Brighton", lat: 50.8284, lon: -0.141 },
+            { code: "RDG", name: "Reading", lat: 51.4586, lon: -0.9732 },
+            { code: "BIS", name: "Bishop's Stortford", lat: 51.8718, lon: 0.1586 },
+            { code: "SOU", name: "Southampton Central", lat: 50.9074, lon: -1.4136 },
+            { code: "BTH", name: "Bath Spa", lat: 51.379, lon: -2.3564 },
+            { code: "BMH", name: "Bournemouth", lat: 50.7274, lon: -1.8647 },
+            { code: "CBG", name: "Cambridge", lat: 52.1944, lon: 0.1376 },
+            { code: "OXF", name: "Oxford", lat: 51.7537, lon: -1.27 },
+            { code: "NWI", name: "Norwich", lat: 52.6272, lon: 1.3069 },
+            { code: "NOT", name: "Nottingham", lat: 52.9473, lon: -1.1462 },
+            { code: "SHF", name: "Sheffield", lat: 53.3782, lon: -1.4629 },
+            { code: "BRS", name: "Bristol Temple Meads", lat: 51.4494, lon: -2.5812 },
+            { code: "EXD", name: "Exeter St Davids", lat: 50.7292, lon: -3.5432 },
+            { code: "PLY", name: "Plymouth", lat: 50.3783, lon: -4.1433 },
+            { code: "LEI", name: "Leicester", lat: 52.6314, lon: -1.1242 }
+        ];
+
+        const el = {
+            homeStation: document.getElementById("homeStation"),
+            destinationInput: document.getElementById("destinationInput"),
+            destinationList: document.getElementById("destinationList"),
+            destinationStationSelect: document.getElementById("destinationStationSelect"),
+            homeBtn: document.getElementById("homeBtn"),
+            swapBtn: document.getElementById("swapBtn"),
+            locateBtn: document.getElementById("locateBtn"),
+            refreshBtn: document.getElementById("refreshBtn"),
+            status: document.getElementById("status"),
+            outboundBody: document.getElementById("outboundBody"),
+            returnBody: document.getElementById("returnBody"),
+            outboundTitle: document.getElementById("outboundTitle"),
+            returnTitle: document.getElementById("returnTitle"),
+            lastUpdated: document.getElementById("lastUpdated"),
+            quickButtons: Array.from(document.querySelectorAll(".quick-destination"))
+        };
+
+        function uniqueStations() {
+            const seen = new Set();
+            return STATIONS.filter((station) => {
+                if (seen.has(station.code)) {
+                    return false;
+                }
+                seen.add(station.code);
+                return true;
+            });
+        }
+
+        function stationName(code) {
+            const found = STATIONS.find((s) => s.code === code);
+            return found ? found.name : code;
+        }
+
+        function populateSelects() {
+            const stations = uniqueStations().sort((a, b) => a.name.localeCompare(b.name));
+            const optionsHtml = stations
+                .map((s) => `<option value="${s.code}">${s.name} (${s.code})</option>`)
+                .join("");
+            el.homeStation.innerHTML = optionsHtml;
+        }
+
+        function populateDestinationList() {
+            const stationOptions = uniqueStations()
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((s) => `<option value="${s.name}"></option><option value="${s.code}"></option>`)
+                .join("");
+
+            const cityOptions = Object.keys(CITY_TO_STATIONS)
+                .sort((a, b) => a.localeCompare(b))
+                .map((city) => `<option value="${city[0].toUpperCase()}${city.slice(1)}"></option>`)
+                .join("");
+
+            el.destinationList.innerHTML = `${cityOptions}${stationOptions}`;
+        }
+
+        function populateDestinationStationSelect() {
+            const stations = uniqueStations().sort((a, b) => a.name.localeCompare(b.name));
+            el.destinationStationSelect.innerHTML = [
+                `<option value="">Choose a station...</option>`,
+                ...stations.map((station) => `<option value="${station.code}">${station.name} (${station.code})</option>`)
+            ].join("");
+        }
+
+        function readPreferences() {
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                return raw ? JSON.parse(raw) : {};
+            } catch {
+                return {};
+            }
+        }
+
+        function savePreferences() {
+            const prefs = {
+                homeStation: el.homeStation.value,
+                destinationInput: el.destinationInput.value.trim(),
+                updatedAt: new Date().toISOString()
+            };
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+            setStatus("Saved your home route.");
+        }
+
+        function applyPreferences() {
+            const prefs = readPreferences();
+            if (prefs.homeStation) el.homeStation.value = prefs.homeStation;
+            if (prefs.destinationInput) el.destinationInput.value = prefs.destinationInput;
+
+            const resolved = resolveDestinationTargets(prefs.destinationInput || "");
+            if (resolved.codes.length === 1) {
+                el.destinationStationSelect.value = resolved.codes[0];
+            }
+        }
+
+        function setStatus(message, isError = false) {
+            el.status.textContent = message;
+            el.status.style.color = isError ? "#b00020" : "var(--muted)";
+        }
+
+        function clearRows(tbody) {
+            tbody.innerHTML = "";
+        }
+
+        function addRow(tbody, due, expected, platform, operator) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+                <td>${due}</td>
+                <td>${expected}</td>
+                <td>${platform || "-"}</td>
+                <td>${operator || "-"}</td>
+            `;
+            tbody.appendChild(tr);
+        }
+
+        function renderNoServices(tbody, message) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `<td colspan="4">${message}</td>`;
+            tbody.appendChild(tr);
+        }
+
+        function safeTime(value) {
+            return value && value !== "" ? value : "-";
+        }
+
+        function pickDepartures(json) {
+            const all = json?.departures?.all;
+            return Array.isArray(all) ? all.slice(0, MAX_ROWS) : [];
+        }
+
+        function normalizeText(value) {
+            return String(value || "").trim().toLowerCase();
+        }
+
+        function normalizeLooseText(value) {
+            return normalizeText(value).replace(/[^a-z0-9]/g, "");
+        }
+
+        function resolveDestinationCode(input) {
+            return resolveDestinationTargets(input).codes[0] || "";
+        }
+
+        function resolveDestinationTargets(input) {
+            const raw = String(input || "").trim();
+            const key = normalizeText(raw);
+            const looseKey = normalizeLooseText(raw);
+            if (!key) {
+                return { label: "", codes: [] };
+            }
+
+            const cityCodes = CITY_TO_STATIONS[key] || CITY_TO_STATIONS[looseKey];
+            if (cityCodes) {
+                return { label: raw, codes: cityCodes };
+            }
+
+            const byCode = STATIONS.find((s) => s.code.toLowerCase() === key);
+            if (byCode) {
+                return { label: byCode.name, codes: [byCode.code] };
+            }
+
+            const byExactName = STATIONS.find((s) => s.name.toLowerCase() === key);
+            if (byExactName) {
+                return { label: byExactName.name, codes: [byExactName.code] };
+            }
+
+            const byLooseName = STATIONS.find((s) => normalizeLooseText(s.name) === looseKey);
+            if (byLooseName) {
+                return { label: byLooseName.name, codes: [byLooseName.code] };
+            }
+
+            const prefixMatches = STATIONS.filter((s) => normalizeLooseText(s.name).startsWith(looseKey));
+            if (prefixMatches.length > 0) {
+                return {
+                    label: raw,
+                    codes: Array.from(new Set(prefixMatches.map((station) => station.code)))
+                };
+            }
+
+            return { label: raw, codes: [] };
+        }
+
+        async function fetchBoard(originCode) {
+            const response = await fetch(`/api/board?from=${encodeURIComponent(originCode)}`, {
+                cache: "no-store",
+                headers: {
+                    Accept: "application/json"
+                }
+            });
+            if (!response.ok) {
+                const text = await response.text();
+                throw new Error(`API error ${response.status}: ${text.slice(0, 200)}`);
+            }
+
+            const contentType = response.headers.get("content-type") || "";
+            const bodyText = await response.text();
+
+            if (!contentType.includes("application/json")) {
+                throw new Error(`Unexpected response from board endpoint: ${bodyText.slice(0, 120)}`);
+            }
+
+            try {
+                return JSON.parse(bodyText);
+            } catch (error) {
+                throw new Error(`Could not parse board JSON: ${error.message}`);
+            }
+        }
+
+        async function fetchBoards(stationCodes) {
+            const uniqueCodes = Array.from(new Set(stationCodes));
+            const boards = await Promise.all(uniqueCodes.map((code) => fetchBoard(code)));
+            return boards;
+        }
+
+        function formatServiceTime(value) {
+            if (!value) {
+                return "-";
+            }
+
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) {
+                return value;
+            }
+
+            return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        }
+
+        function filterServicesByDestination(boards, destinationCodes) {
+            const allowedCodes = new Set(destinationCodes);
+            return boards
+                .flatMap((board) => board.services)
+                .filter((service) => allowedCodes.has(service.destinationCode))
+                .sort((left, right) => new Date(left.scheduled).getTime() - new Date(right.scheduled).getTime());
+        }
+
+        async function refreshBoards() {
+            const origin = el.homeStation.value;
+            const destinationTarget = resolveDestinationTargets(el.destinationInput.value);
+
+            savePreferences();
+
+            el.outboundTitle.textContent = `Next trains: ${stationName(origin)} to ${destinationTarget.label || el.destinationInput.value.trim()}`;
+            el.returnTitle.textContent = `Next trains: ${destinationTarget.label || el.destinationInput.value.trim()} back to ${stationName(origin)}`;
+
+            clearRows(el.outboundBody);
+            clearRows(el.returnBody);
+
+            if (destinationTarget.codes.length === 0) {
+                renderNoServices(el.outboundBody, "Type a destination city or station name.");
+                renderNoServices(el.returnBody, "Type a destination city or station name.");
+                setStatus("Could not resolve destination. Try a station code like CBG or city like London.", true);
+                return;
+            }
+
+            if (destinationTarget.codes.length === 1 && origin === destinationTarget.codes[0]) {
+                renderNoServices(el.outboundBody, "Choose different origin and destination stations.");
+                renderNoServices(el.returnBody, "Choose different origin and destination stations.");
+                setStatus("Origin and destination cannot be the same.", true);
+                return;
+            }
+
+            setStatus("Loading latest departures...");
+
+            try {
+                const [outboundJson, returnJson] = await Promise.all([
+                    fetchBoard(origin),
+                    fetchBoards(destinationTarget.codes)
+                ]);
+
+                const outbound = pickDepartures({ departures: { all: filterServicesByDestination([outboundJson], destinationTarget.codes) } });
+                const inbound = pickDepartures({ departures: { all: filterServicesByDestination(returnJson, [origin]) } });
+
+                if (outbound.length === 0) {
+                    renderNoServices(el.outboundBody, "No matching outbound services found right now.");
+                } else {
+                    outbound.forEach((item) => {
+                        addRow(
+                            el.outboundBody,
+                            formatServiceTime(item.scheduled),
+                            item.status === "OnTime" ? "On time" : (item.status || "-"),
+                            safeTime(item.platform),
+                            safeTime(item.operator)
+                        );
+                    });
+                }
+
+                if (inbound.length === 0) {
+                    renderNoServices(el.returnBody, "No matching return services found right now.");
+                } else {
+                    inbound.forEach((item) => {
+                        addRow(
+                            el.returnBody,
+                            formatServiceTime(item.scheduled),
+                            item.status === "OnTime" ? "On time" : (item.status || "-"),
+                            safeTime(item.platform),
+                            safeTime(item.operator)
+                        );
+                    });
+                }
+
+                const now = new Date();
+                el.lastUpdated.textContent = `Last updated: ${now.toLocaleString()}`;
+                setStatus("Live train boards updated.");
+            } catch (error) {
+                renderNoServices(el.outboundBody, "Could not fetch outbound trains.");
+                renderNoServices(el.returnBody, "Could not fetch return trains.");
+                setStatus(`Could not load trains: ${error.message}`, true);
+            }
+        }
+
+        function toRadians(value) {
+            return (value * Math.PI) / 180;
+        }
+
+        function distanceKm(aLat, aLon, bLat, bLon) {
+            const earth = 6371;
+            const dLat = toRadians(bLat - aLat);
+            const dLon = toRadians(bLon - aLon);
+            const a =
+                Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(toRadians(aLat)) * Math.cos(toRadians(bLat)) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return earth * c;
+        }
+
+        function nearestStation(lat, lon) {
+            let winner = null;
+            for (const station of STATIONS) {
+                const dist = distanceKm(lat, lon, station.lat, station.lon);
+                if (!winner || dist < winner.dist) {
+                    winner = { station, dist };
+                }
+            }
+            return winner;
+        }
+
+        function detectNearestStation() {
+            if (!navigator.geolocation) {
+                setStatus("GPS geolocation is not supported by your browser.", true);
+                return;
+            }
+
+            setStatus("Locating your nearest station...");
+            navigator.geolocation.getCurrentPosition(
+                (position) => {
+                    const hit = nearestStation(position.coords.latitude, position.coords.longitude);
+                    if (!hit) {
+                        setStatus("Could not determine nearest station.", true);
+                        return;
+                    }
+
+                    el.homeStation.value = hit.station.code;
+                    savePreferences();
+                    setStatus(`Using ${hit.station.name} as your home station (~${hit.dist.toFixed(1)} km away).`);
+                },
+                (error) => {
+                    setStatus(`Could not access location: ${error.message}`, true);
+                },
+                { enableHighAccuracy: false, timeout: 12000, maximumAge: 300000 }
+            );
+        }
+
+        function swapDirection() {
+            const resolvedDestination = resolveDestinationTargets(el.destinationInput.value);
+            if (resolvedDestination.codes.length === 0) {
+                setStatus("Set a valid destination before swapping.", true);
+                return;
+            }
+
+            const currentHome = el.homeStation.value;
+            el.homeStation.value = resolvedDestination.codes[0];
+            el.destinationInput.value = stationName(currentHome);
+            savePreferences();
+            refreshBoards();
+        }
+
+        function setQuickDestination(value) {
+            el.destinationInput.value = value;
+            const resolved = resolveDestinationTargets(value);
+            el.destinationStationSelect.value = resolved.codes[0] || "";
+            savePreferences();
+            refreshBoards();
+        }
+
+        function setStationDropdown(code) {
+            if (!code) {
+                return;
+            }
+
+            el.destinationInput.value = code;
+            savePreferences();
+            refreshBoards();
+        }
+
+        function init() {
+            populateSelects();
+            populateDestinationList();
+            populateDestinationStationSelect();
+
+            applyPreferences();
+
+            if (!el.homeStation.value) {
+                el.homeStation.value = "BIS";
+            }
+
+            if (!el.destinationInput.value) {
+                el.destinationInput.value = "London";
+            }
+
+            el.homeBtn.addEventListener("click", refreshBoards);
+            el.swapBtn.addEventListener("click", swapDirection);
+            el.refreshBtn.addEventListener("click", refreshBoards);
+            el.locateBtn.addEventListener("click", detectNearestStation);
+            el.homeStation.addEventListener("change", savePreferences);
+            el.destinationInput.addEventListener("change", savePreferences);
+            el.destinationStationSelect.addEventListener("change", (event) => {
+                setStationDropdown(event.target.value);
+            });
+            el.destinationInput.addEventListener("keydown", (event) => {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    refreshBoards();
+                }
+            });
+
+            el.quickButtons.forEach((button) => {
+                button.addEventListener("click", () => {
+                    const destination = button.getAttribute("data-destination") || "";
+                    setQuickDestination(destination);
+                });
+            });
+
+            refreshBoards();
+        }
+
+        init();
+    </script>
+</body>
+
+</html>

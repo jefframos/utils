@@ -1,0 +1,20 @@
+{
+    "name": "utils-gh-pages",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Utilities collection for GitHub Pages with auto-generated app menu",
+    "scripts": {
+        "build": "node scripts/generate-menu.js",
+        "new:app": "node scripts/new-app.js",
+        "start:hub": "node scripts/serve-hub.js",
+        "serve:hub": "npm run start:hub",
+        "my-train": "node scripts/serve-my-train.js",
+        "start": "node scripts/serve-app.js",
+        "serve": "npm run start"
+    },
+    "devDependencies": {
+        "@types/node": "^22.15.31",
+        "typescript": "^5.8.3",
+        "vite": "^6.3.5"
+    }
+}
