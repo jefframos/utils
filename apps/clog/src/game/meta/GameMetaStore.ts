@@ -29,10 +29,40 @@ export type MapControlsWindowMeta = {
     height: number;
 };
 
+export type InventoryWindowMeta = {
+    open: boolean;
+    minimized: boolean;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+};
+
+export type ToolInspectorWindowMeta = {
+    open: boolean;
+    minimized: boolean;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+};
+
+export type InventoryItemDetailsWindowMeta = {
+    open: boolean;
+    minimized: boolean;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+};
+
 export type GameMeta = {
     windows: {
         minimap: MinimapWindowMeta;
         mapControls: MapControlsWindowMeta;
+        inventory: InventoryWindowMeta;
+        toolInspector: ToolInspectorWindowMeta;
+        inventoryItemDetails: InventoryItemDetailsWindowMeta;
     };
 };
 
@@ -68,6 +98,48 @@ export class GameMetaStore {
                 ...this.meta.windows,
                 mapControls: {
                     ...this.meta.windows.mapControls,
+                    ...next,
+                },
+            },
+        };
+        this.emit();
+    }
+
+    updateInventory(next: Partial<InventoryWindowMeta>): void {
+        this.meta = {
+            ...this.meta,
+            windows: {
+                ...this.meta.windows,
+                inventory: {
+                    ...this.meta.windows.inventory,
+                    ...next,
+                },
+            },
+        };
+        this.emit();
+    }
+
+    updateToolInspector(next: Partial<ToolInspectorWindowMeta>): void {
+        this.meta = {
+            ...this.meta,
+            windows: {
+                ...this.meta.windows,
+                toolInspector: {
+                    ...this.meta.windows.toolInspector,
+                    ...next,
+                },
+            },
+        };
+        this.emit();
+    }
+
+    updateInventoryItemDetails(next: Partial<InventoryItemDetailsWindowMeta>): void {
+        this.meta = {
+            ...this.meta,
+            windows: {
+                ...this.meta.windows,
+                inventoryItemDetails: {
+                    ...this.meta.windows.inventoryItemDetails,
                     ...next,
                 },
             },

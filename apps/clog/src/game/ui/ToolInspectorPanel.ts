@@ -1,9 +1,12 @@
 import type { ToolDefinition } from '../core/ToolComponent';
 import { createFloatingWindow, type FloatingWindowState } from './FloatingWindow';
+import type { ToolInspectorWindowMeta } from '../meta/GameMetaStore';
 
 type ToolInspectorPanelOptions = {
     tools: ToolDefinition[];
     initialToolId: string;
+    initialWindowState: ToolInspectorWindowMeta;
+    onWindowStateChange: (state: ToolInspectorWindowMeta) => void;
 };
 
 export type ToolInspectorPanel = {
@@ -13,19 +16,15 @@ export type ToolInspectorPanel = {
 };
 
 export function createToolInspectorPanel(options: ToolInspectorPanelOptions): ToolInspectorPanel {
-    const initialState: FloatingWindowState = {
-        open: false,
-        minimized: false,
-        left: Math.max(16, window.innerWidth - 680),
-        top: 56,
-        width: 320,
-        height: 280,
-    };
+    const initialState: FloatingWindowState = options.initialWindowState;
 
     const frame = createFloatingWindow({
         title: 'Tool Inspector',
         className: 'tool-inspector-window',
         initialState,
+        onStateChange: (state) => {
+            options.onWindowStateChange(state);
+        },
     });
 
     const root = document.createElement('div');

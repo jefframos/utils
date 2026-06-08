@@ -4,12 +4,23 @@ import { GameSimulation } from './core/GameSimulation';
 import { WEAPON_DEFINITIONS } from './core/ToolComponent';
 import { GameScene } from './scenes/GameScene';
 import type { WorldSnapshot } from './world/WorldModel';
-import { GameMetaStore, type GameMeta, type MapControlsWindowMeta, type MinimapWindowMeta } from './meta/GameMetaStore';
+import {
+    GameMetaStore,
+    type GameMeta,
+    type InventoryItemDetailsWindowMeta,
+    type InventoryWindowMeta,
+    type MapControlsWindowMeta,
+    type MinimapWindowMeta,
+    type ToolInspectorWindowMeta,
+} from './meta/GameMetaStore';
 import { createMapControlPanel } from './ui/MapControlPanel';
+import { createInventoryPanel } from './ui/inventory/InventoryPanel';
+import { createInventoryItemDetailsWindow } from './ui/inventory/InventoryItemDetailsWindow';
 import { createMinimapWindow } from './ui/MinimapWindow';
 import { createToolInspectorPanel } from './ui/ToolInspectorPanel';
 import { createWindowControlRail } from './ui/WindowControlRail';
 import { ViewportSpace } from './core/ViewportSpace';
+import { getInventoryItemDefinition } from './inventory/InventoryModel';
 
 const SAVE_KEY = 'asteroid-valley-save-v1';
 const META_COOKIE_KEY = 'asteroid-valley-meta-v1';
@@ -64,6 +75,39 @@ function normalizeMapControlsMeta(candidate: Partial<MapControlsWindowMeta>): Ma
     };
 }
 
+function normalizeInventoryMeta(candidate: Partial<InventoryWindowMeta>): InventoryWindowMeta {
+    return {
+        open: candidate.open === true,
+        minimized: candidate.minimized === true,
+        left: Number.isFinite(candidate.left) ? Number(candidate.left) : Math.max(16, window.innerWidth - 640),
+        top: Number.isFinite(candidate.top) ? Number(candidate.top) : 92,
+        width: 560,
+        height: 500,
+    };
+}
+
+function normalizeToolInspectorMeta(candidate: Partial<ToolInspectorWindowMeta>): ToolInspectorWindowMeta {
+    return {
+        open: candidate.open === true,
+        minimized: candidate.minimized === true,
+        left: Number.isFinite(candidate.left) ? Number(candidate.left) : Math.max(16, window.innerWidth - 680),
+        top: Number.isFinite(candidate.top) ? Number(candidate.top) : 56,
+        width: Number.isFinite(candidate.width) ? Number(candidate.width) : 320,
+        height: Number.isFinite(candidate.height) ? Number(candidate.height) : 280,
+    };
+}
+
+function normalizeInventoryItemDetailsMeta(candidate: Partial<InventoryItemDetailsWindowMeta>): InventoryItemDetailsWindowMeta {
+    return {
+        open: false,
+        minimized: candidate.minimized === true,
+        left: Number.isFinite(candidate.left) ? Number(candidate.left) : 24,
+        top: Number.isFinite(candidate.top) ? Number(candidate.top) : 120,
+        width: Number.isFinite(candidate.width) ? Number(candidate.width) : 340,
+        height: Number.isFinite(candidate.height) ? Number(candidate.height) : 300,
+    };
+}
+
 function loadMetaFromCookie(): GameMeta | null {
     try {
         const raw = getCookie(META_COOKIE_KEY);
@@ -72,14 +116,26 @@ function loadMetaFromCookie(): GameMeta | null {
         const parsed = JSON.parse(decoded) as Partial<GameMeta>;
         const minimap = normalizeMinimapMeta(parsed?.windows?.minimap ?? {});
         const mapControls = normalizeMapControlsMeta(parsed?.windows?.mapControls ?? {});
-        return { windows: { minimap, mapControls } };
+        const inventory = normalizeInventoryMeta(parsed?.windows?.inventory ?? {});
+        const toolInspector = normalizeToolInspectorMeta(parsed?.windows?.toolInspector ?? {});
+        const inventoryItemDetails = normalizeInventoryItemDetailsMeta(parsed?.windows?.inventoryItemDetails ?? {});
+        return { windows: { minimap, mapControls, inventory, toolInspector, inventoryItemDetails } };
     } catch {
         return null;
     }
 }
 
 function saveMetaToCookie(meta: GameMeta): void {
-    const value = encodeURIComponent(JSON.stringify(meta));
+    const { width: _inventoryWidth, height: _inventoryHeight, ...inventoryPersisted } = meta.windows.inventory;
+    const { width: _detailsWidth, height: _detailsHeight, ...detailsPersisted } = meta.windows.inventoryItemDetails;
+    const persisted = {
+        windows: {
+            ...meta.windows,
+            inventory: inventoryPersisted,
+            inventoryItemDetails: detailsPersisted,
+        },
+    };
+    const value = encodeURIComponent(JSON.stringify(persisted));
     document.cookie = `${META_COOKIE_KEY}=${value}; path=/; max-age=31536000; samesite=lax`;
 }
 
@@ -101,24 +157,67 @@ function saveSnapshot(snapshot: WorldSnapshot): void {
     localStorage.setItem(SAVE_KEY, JSON.stringify(snapshot));
 }
 
-function makeIconSvg(type: 'target' | 'map' | 'debug'): string {
+function createWorldAutosave(world: GameSimulation['world']): {
+    schedule: (delayMs?: number) => void;
+    flush: () => void;
+} {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const flush = () => {
+        if (timer) {
+            clearTimeout(timer);
+            timer = null;
+        }
+        saveSnapshot(world.toSnapshot());
+    };
+
+    const schedule = (delayMs = 140) => {
+        if (timer) {
+            clearTimeout(timer);
+        }
+        timer = setTimeout(() => {
+            timer = null;
+            saveSnapshot(world.toSnapshot());
+        }, delayMs);
+    };
+
+    return { schedule, flush };
+}
+
+function makeIconSvg(type: 'target' | 'map' | 'debug' | 'inventory'): string {
     if (type === 'target') {
         return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="2" fill="currentColor"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="square"/></svg>';
     }
     if (type === 'map') {
         return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5l5-2 5 2 8-3v14l-8 3-5-2-5 2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 4.5v15M13 6.5v15" stroke="currentColor" stroke-width="1.6"/></svg>';
     }
+    if (type === 'inventory') {
+        return '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4 9h16M8 5v14M14 5v14" stroke="currentColor" stroke-width="1.6"/></svg>';
+    }
     return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16M4 12h16" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>';
 }
 
-function createActionButton(icon: 'target' | 'map' | 'debug', label: string, tooltip: string): HTMLButtonElement {
+function createActionButton(icon: 'target' | 'map' | 'debug' | 'inventory', label: string, tooltip: string): HTMLButtonElement {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'ui95-button action-button';
     button.title = tooltip;
     button.setAttribute('aria-label', label);
-    button.innerHTML = `<span class="action-button-icon">${makeIconSvg(icon)}</span><span class="action-button-label">${label}</span>`;
+    button.innerHTML = `<span class="action-button-icon" aria-hidden="true">${makeIconSvg(icon)}</span>`;
     return button;
+}
+
+function getToolIconSvg(toolId: string): string {
+    return toolId.includes('mallet')
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="4" width="9" height="6" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 10l-6 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M5 19l2-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18h8l5-12h-8L4 18Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 6l3-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+}
+
+function getDropDefinitionIdForBiome(biome: number): string {
+    if (biome === 2) return 'debug-ice-shard';
+    if (biome === 5) return 'debug-scrap';
+    if (biome === 3 || biome === 4) return 'debug-battery';
+    return 'debug-asteroid-ore';
 }
 
 export async function bootstrapGame(): Promise<void> {
@@ -135,13 +234,34 @@ export async function bootstrapGame(): Promise<void> {
 
     const simulation = new GameSimulation();
     const transport = new LocalTransport(simulation);
+    const worldAutosave = createWorldAutosave(simulation.world);
 
     const saved = loadSnapshot();
     if (saved) {
         transport.send({ type: 'LoadWorldSnapshot', snapshot: saved });
     }
 
-    const scene = new GameScene(app, simulation.world, transport, () => simulation.tools.getActiveTool());
+    let mainActionToolId = simulation.tools.getActiveTool().id;
+    let rightActionToolId = WEAPON_DEFINITIONS.find((entry) => entry.id !== mainActionToolId)?.id ?? mainActionToolId;
+
+    let inventoryPanel: ReturnType<typeof createInventoryPanel> | null = null;
+    let toolInspector: ReturnType<typeof createToolInspectorPanel> | null = null;
+    let onToolEquippedExternally: (toolId: string) => void = () => { };
+    const scene = new GameScene(
+        app,
+        simulation.world,
+        transport,
+        () => WEAPON_DEFINITIONS.find((entry) => entry.id === mainActionToolId) ?? simulation.tools.getActiveTool(),
+        () => WEAPON_DEFINITIONS.find((entry) => entry.id === rightActionToolId) ?? simulation.tools.getActiveTool(),
+        (toolId) => {
+            const next = WEAPON_DEFINITIONS.find((entry) => entry.id === toolId);
+            if (!next) return;
+            simulation.tools.setActiveTool(next);
+            inventoryPanel?.setEquippedTool(next.id);
+            toolInspector?.setActiveTool(next.id);
+            onToolEquippedExternally(next.id);
+        },
+    );
     scene.initialize();
     const viewportSpace = ViewportSpace.get();
 
@@ -153,11 +273,17 @@ export async function bootstrapGame(): Promise<void> {
     const persistedMeta = loadMetaFromCookie();
     const initialMinimap = normalizeMinimapMeta(persistedMeta?.windows?.minimap ?? {});
     const initialMapControls = normalizeMapControlsMeta(persistedMeta?.windows?.mapControls ?? {});
+    const initialInventory = normalizeInventoryMeta(persistedMeta?.windows?.inventory ?? {});
+    const initialToolInspector = normalizeToolInspectorMeta(persistedMeta?.windows?.toolInspector ?? {});
+    const initialInventoryItemDetails = normalizeInventoryItemDetailsMeta(persistedMeta?.windows?.inventoryItemDetails ?? {});
 
     const metaStore = new GameMetaStore({
         windows: {
             minimap: initialMinimap,
             mapControls: initialMapControls,
+            inventory: initialInventory,
+            toolInspector: initialToolInspector,
+            inventoryItemDetails: initialInventoryItemDetails,
         },
     });
 
@@ -203,8 +329,84 @@ export async function bootstrapGame(): Promise<void> {
         minimap.refresh();
     });
 
-    const actionBar = createWindowControlRail({ orientation: 'horizontal', className: 'bottom-action-bar' });
+    const actionBar = createWindowControlRail({ orientation: 'vertical', className: 'bottom-action-bar' });
     actionBar.root.setAttribute('aria-label', 'Game quick actions');
+
+    const actionHotbar = document.createElement('div');
+    actionHotbar.className = 'action-hotbar';
+    actionHotbar.setAttribute('aria-label', 'Action hotbar');
+
+    const mainActionButton = document.createElement('button');
+    mainActionButton.type = 'button';
+    mainActionButton.className = 'ui95-button action-hotbar-slot';
+
+    const rightActionButton = document.createElement('button');
+    rightActionButton.type = 'button';
+    rightActionButton.className = 'ui95-button action-hotbar-slot';
+
+    actionHotbar.append(mainActionButton, rightActionButton);
+
+    const renderActionHotbar = () => {
+        const equippedId = simulation.tools.getActiveTool().id;
+        const mainTool = WEAPON_DEFINITIONS.find((entry) => entry.id === mainActionToolId);
+        const rightTool = WEAPON_DEFINITIONS.find((entry) => entry.id === rightActionToolId);
+
+        if (mainTool) {
+            mainActionButton.title = `Main action: ${mainTool.name}`;
+            mainActionButton.innerHTML = `<span class="action-hotbar-slot-label">LMB</span><span class="action-hotbar-slot-icon">${getToolIconSvg(mainTool.id)}</span>`;
+            const mainItemDef = getInventoryItemDefinition(mainTool.id);
+            if (mainItemDef) {
+                mainActionButton.style.setProperty('--slot-backdrop', mainItemDef.view.backdrop);
+                mainActionButton.style.setProperty('--slot-tint', mainItemDef.view.tint);
+            }
+            mainActionButton.classList.toggle('is-equipped', mainTool.id === equippedId);
+        }
+
+        if (rightTool) {
+            rightActionButton.title = `Right-click action: ${rightTool.name}`;
+            rightActionButton.innerHTML = `<span class="action-hotbar-slot-label">RMB</span><span class="action-hotbar-slot-icon">${getToolIconSvg(rightTool.id)}</span>`;
+            const rightItemDef = getInventoryItemDefinition(rightTool.id);
+            if (rightItemDef) {
+                rightActionButton.style.setProperty('--slot-backdrop', rightItemDef.view.backdrop);
+                rightActionButton.style.setProperty('--slot-tint', rightItemDef.view.tint);
+            }
+            rightActionButton.classList.toggle('is-equipped', rightTool.id === equippedId);
+        }
+    };
+
+    const setMainActionTool = (toolId: string) => {
+        mainActionToolId = toolId;
+        if (rightActionToolId === mainActionToolId) {
+            rightActionToolId = WEAPON_DEFINITIONS.find((entry) => entry.id !== mainActionToolId)?.id ?? mainActionToolId;
+        }
+        renderActionHotbar();
+    };
+
+    const applyEquippedTool = (toolId: string, setMainSlot: boolean): void => {
+        const next = WEAPON_DEFINITIONS.find((entry) => entry.id === toolId);
+        if (!next) return;
+        simulation.tools.setActiveTool(next);
+        inventoryPanel?.setEquippedTool(next.id);
+        toolInspector?.setActiveTool(next.id);
+        if (setMainSlot) {
+            setMainActionTool(next.id);
+        } else {
+            renderActionHotbar();
+        }
+    };
+
+    onToolEquippedExternally = (toolId: string) => {
+        void toolId;
+        renderActionHotbar();
+    };
+
+    mainActionButton.addEventListener('click', () => {
+        applyEquippedTool(mainActionToolId, true);
+    });
+
+    rightActionButton.addEventListener('click', () => {
+        applyEquippedTool(rightActionToolId, false);
+    });
 
     const snapBaseButton = createActionButton('target', 'Snap To Base', 'Center camera on base tile');
     snapBaseButton.addEventListener('click', () => {
@@ -212,11 +414,16 @@ export async function bootstrapGame(): Promise<void> {
         minimap.refresh();
     });
 
+    const inventoryButton = createActionButton('inventory', 'Inventory', 'Open the inventory window');
+    inventoryButton.addEventListener('click', () => {
+        inventoryPanel?.open();
+    });
+
     const mapToggleButton = minimap.getToggleButton();
     mapToggleButton.classList.add('action-button');
     mapToggleButton.title = 'Open or close the minimap window';
     mapToggleButton.setAttribute('aria-label', 'Toggle map window');
-    mapToggleButton.innerHTML = `<span class="action-button-icon">${makeIconSvg('map')}</span><span class="action-button-label">Map</span>`;
+    mapToggleButton.innerHTML = `<span class="action-button-icon" aria-hidden="true">${makeIconSvg('map')}</span>`;
 
     const debugToggleButton = createActionButton('debug', 'Debug', 'Show or hide camera debug crosshair');
     const updateDebugToggleState = () => {
@@ -228,30 +435,55 @@ export async function bootstrapGame(): Promise<void> {
     });
     updateDebugToggleState();
 
-    actionBar.root.append(snapBaseButton, mapToggleButton, debugToggleButton);
+    actionBar.root.append(snapBaseButton, inventoryButton, mapToggleButton, debugToggleButton);
     document.body.appendChild(actionBar.root);
+    document.body.appendChild(actionHotbar);
 
     transport.onEvent((event) => {
         if (event.type === 'WorldChunkDirty' || event.type === 'WorldGenerated') {
             minimap.refresh();
         }
+
+        if (event.type === 'TileDamaged') {
+            let collected = 0;
+            for (const hit of event.hits) {
+                if (!hit.opened) continue;
+                const tile = simulation.world.getTile(hit.x, hit.y);
+                if (!tile) continue;
+                const dropId = getDropDefinitionIdForBiome(tile.biome);
+                const added = inventoryPanel?.addItem(dropId, 1) ?? 0;
+                collected += added;
+            }
+
+            if (collected > 0) {
+                panel.setStatus(`Collected ${collected} ore from mined tiles.`);
+            }
+
+            if (event.hits.some((hit) => hit.opened)) {
+                worldAutosave.flush();
+            } else if (event.hits.length > 0) {
+                worldAutosave.schedule();
+            }
+        }
+
+        if (event.type === 'TileMined') {
+            worldAutosave.schedule();
+        }
     });
 
-    let toolInspector: ReturnType<typeof createToolInspectorPanel> | null = null;
+    let inventoryItemDetails: ReturnType<typeof createInventoryItemDetailsWindow> | null = null;
 
     const panel = createMapControlPanel({
         initialSeed: simulation.world.getSeed(),
-        initialWindowState: initialMapControls,
         weapons: WEAPON_DEFINITIONS,
         initialWeaponId: simulation.tools.getActiveTool().id,
         onWindowStateChange: (state) => {
             metaStore.updateMapControls(state);
         },
         onSelectWeapon: (weaponId) => {
+            applyEquippedTool(weaponId, true);
             const next = WEAPON_DEFINITIONS.find((entry) => entry.id === weaponId);
             if (!next) return;
-            simulation.tools.setActiveTool(next);
-            toolInspector?.setActiveTool(next.id);
             panel.setStatus(`Selected weapon: ${next.name}.`);
         },
         onGenerate: (seed) => {
@@ -271,6 +503,36 @@ export async function bootstrapGame(): Promise<void> {
     toolInspector = createToolInspectorPanel({
         tools: WEAPON_DEFINITIONS,
         initialToolId: simulation.tools.getActiveTool().id,
+        initialWindowState: initialToolInspector,
+        onWindowStateChange: (state) => {
+            metaStore.updateToolInspector(state);
+        },
+    });
+
+    inventoryItemDetails = createInventoryItemDetailsWindow({
+        initialWindowState: initialInventoryItemDetails,
+        onWindowStateChange: (state) => {
+            metaStore.updateInventoryItemDetails(state);
+        },
+        onEquipTool: (toolId) => {
+            applyEquippedTool(toolId, true);
+        },
+    });
+    inventoryItemDetails.clearSelection();
+
+    inventoryPanel = createInventoryPanel({
+        initialEquippedToolId: simulation.tools.getActiveTool().id,
+        initialWindowState: initialInventory,
+        onWindowStateChange: (state) => {
+            metaStore.updateInventory(state);
+        },
+        onEquipTool: (toolId) => {
+            applyEquippedTool(toolId, true);
+        },
+        onInspectItem: (selection) => {
+            inventoryItemDetails?.setSelection(selection);
+            inventoryItemDetails?.open();
+        },
     });
 
     const topToolbar = document.createElement('nav');
@@ -369,4 +631,6 @@ export async function bootstrapGame(): Promise<void> {
         panel.setStatus(`Loaded saved map with seed ${saved.seed}.`);
         minimap.refresh();
     }
+
+    renderActionHotbar();
 }

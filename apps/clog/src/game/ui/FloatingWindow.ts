@@ -10,6 +10,7 @@ export type FloatingWindowState = {
 type FloatingWindowOptions = {
     title: string;
     className?: string;
+    resizable?: boolean;
     initialState: FloatingWindowState;
     onStateChange?: (state: FloatingWindowState) => void;
 };
@@ -30,8 +31,11 @@ function bringFloatingWindowToFront(root: HTMLElement): void {
 }
 
 export function createFloatingWindow(options: FloatingWindowOptions): FloatingWindow {
+    const canResize = options.resizable !== false;
     const root = document.createElement('section');
     root.className = `floating-window ${options.className ?? ''}`.trim();
+    root.classList.toggle('is-resizable', canResize);
+    root.classList.toggle('is-fixed-size', !canResize);
 
     const header = document.createElement('header');
     header.className = 'floating-window-header';
@@ -83,8 +87,13 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
         root.classList.toggle('is-minimized', state.minimized);
         root.style.left = `${state.left}px`;
         root.style.top = `${state.top}px`;
-        root.style.width = `${state.width}px`;
-        root.style.height = `${state.height}px`;
+        if (canResize) {
+            root.style.width = `${state.width}px`;
+            root.style.height = `${state.height}px`;
+        } else {
+            root.style.removeProperty('width');
+            root.style.removeProperty('height');
+        }
         minimizeButton.textContent = state.minimized ? '\u25A1' : '\u2014';
         minimizeButton.setAttribute('aria-label', state.minimized ? 'Restore window' : 'Minimize window');
         options.onStateChange?.({ ...state });
@@ -141,20 +150,23 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
         setState({ open: false, minimized: false });
     });
 
-    const resizeObserver = new ResizeObserver(() => {
-        if (root.hidden || state.minimized) return;
-        const rect = root.getBoundingClientRect();
-        const nextWidth = Math.round(rect.width);
-        const nextHeight = Math.round(rect.height);
-        if (nextWidth === state.width && nextHeight === state.height) return;
-        state = {
-            ...state,
-            width: nextWidth,
-            height: nextHeight,
-        };
-        options.onStateChange?.({ ...state });
-    });
-    resizeObserver.observe(root);
+    let resizeObserver: ResizeObserver | null = null;
+    if (canResize) {
+        resizeObserver = new ResizeObserver(() => {
+            if (root.hidden || state.minimized) return;
+            const rect = root.getBoundingClientRect();
+            const nextWidth = Math.round(rect.width);
+            const nextHeight = Math.round(rect.height);
+            if (nextWidth === state.width && nextHeight === state.height) return;
+            state = {
+                ...state,
+                width: nextWidth,
+                height: nextHeight,
+            };
+            options.onStateChange?.({ ...state });
+        });
+        resizeObserver.observe(root);
+    }
 
     const onWindowResize = () => {
         clamp();
@@ -177,7 +189,7 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
         setMinimized: (minimized: boolean) => setState({ minimized }),
         getState: () => ({ ...state }),
         destroy: () => {
-            resizeObserver.disconnect();
+            resizeObserver?.disconnect();
             window.removeEventListener('mousemove', onMouseMove);
             window.removeEventListener('mouseup', onMouseUp);
             window.removeEventListener('resize', onWindowResize);

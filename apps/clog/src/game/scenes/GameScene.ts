@@ -34,15 +34,20 @@ export class GameScene {
     private isMiddlePanning = false;
     private readonly lastPanPointer = new Point();
     private isPrimaryMining = false;
-    private readonly miningPointer = new Point();
-    private holdMineCooldownMs = 0;
+    private isSecondaryMining = false;
+    private readonly primaryMiningPointer = new Point();
+    private readonly secondaryMiningPointer = new Point();
+    private primaryHoldMineCooldownMs = 0;
+    private secondaryHoldMineCooldownMs = 0;
     private readonly damagePopups: Array<{ sprite: BitmapText; ttlMs: number; ageMs: number; velocityY: number }> = [];
 
     constructor(
         private readonly app: Application,
         private readonly world: WorldModel,
         private readonly transport: GameTransport,
-        private readonly getActiveTool: () => ToolDefinition,
+        private readonly getPrimaryTool: () => ToolDefinition,
+        private readonly getSecondaryTool: () => ToolDefinition,
+        private readonly onToolSelected: (toolId: string) => void,
     ) {
         this.gameCamera = new GameCamera(this.app, this.camera);
         this.viewportSpace = ViewportSpace.initialize(this.app, this.gameCamera);
@@ -212,17 +217,31 @@ export class GameScene {
         // Prevent browser auto-scroll when middle mouse is pressed over the canvas.
         this.app.canvas.addEventListener('mousedown', this.onCanvasMouseDown);
         this.app.canvas.addEventListener('auxclick', this.onCanvasAuxClick);
+        this.app.canvas.addEventListener('contextmenu', this.onCanvasContextMenu);
         this.app.canvas.addEventListener('wheel', this.onWheelZoom, { passive: false });
     }
 
     private onPointerDown(event: FederatedPointerEvent): void {
         if (event.button === 0) {
             this.isPrimaryMining = true;
-            this.miningPointer.copyFrom(event.global);
-            this.holdMineCooldownMs = 0;
-            const weapon = this.getActiveTool();
+            this.primaryMiningPointer.copyFrom(event.global);
+            this.primaryHoldMineCooldownMs = 0;
+            const weapon = this.getPrimaryTool();
+            this.onToolSelected(weapon.id);
             if (weapon.hitOnClick) {
-                this.mineAtPointer(this.miningPointer, 'click');
+                this.mineAtPointer(this.primaryMiningPointer, 'click');
+            }
+            return;
+        }
+
+        if (event.button === 2) {
+            this.isSecondaryMining = true;
+            this.secondaryMiningPointer.copyFrom(event.global);
+            this.secondaryHoldMineCooldownMs = 0;
+            const weapon = this.getSecondaryTool();
+            this.onToolSelected(weapon.id);
+            if (weapon.hitOnClick) {
+                this.mineAtPointer(this.secondaryMiningPointer, 'click');
             }
             return;
         }
@@ -234,7 +253,10 @@ export class GameScene {
 
     private onPointerMove(event: FederatedPointerEvent): void {
         if (this.isPrimaryMining) {
-            this.miningPointer.copyFrom(event.global);
+            this.primaryMiningPointer.copyFrom(event.global);
+        }
+        if (this.isSecondaryMining) {
+            this.secondaryMiningPointer.copyFrom(event.global);
         }
 
         if (!this.isMiddlePanning) return;
@@ -249,7 +271,13 @@ export class GameScene {
     private onPointerUp(event: FederatedPointerEvent): void {
         if (event.button === 0) {
             this.isPrimaryMining = false;
-            this.holdMineCooldownMs = 0;
+            this.primaryHoldMineCooldownMs = 0;
+            return;
+        }
+
+        if (event.button === 2) {
+            this.isSecondaryMining = false;
+            this.secondaryHoldMineCooldownMs = 0;
             return;
         }
 
@@ -265,15 +293,30 @@ export class GameScene {
     }
 
     private updateHoldMining(deltaMs: number): void {
-        if (!this.isPrimaryMining) return;
-        const weapon = this.getActiveTool();
-        if (!weapon.hitOnHold || weapon.hitsPerSecond <= 0) return;
+        if (this.isPrimaryMining) {
+            const primary = this.getPrimaryTool();
+            if (primary.hitOnHold && primary.hitsPerSecond > 0) {
+                this.onToolSelected(primary.id);
+                this.primaryHoldMineCooldownMs -= deltaMs;
+                const primaryIntervalMs = 1000 / primary.hitsPerSecond;
+                while (this.primaryHoldMineCooldownMs <= 0) {
+                    this.mineAtPointer(this.primaryMiningPointer, 'hold');
+                    this.primaryHoldMineCooldownMs += primaryIntervalMs;
+                }
+            }
+        }
 
-        this.holdMineCooldownMs -= deltaMs;
-        const intervalMs = 1000 / weapon.hitsPerSecond;
-        while (this.holdMineCooldownMs <= 0) {
-            this.mineAtPointer(this.miningPointer, 'hold');
-            this.holdMineCooldownMs += intervalMs;
+        if (this.isSecondaryMining) {
+            const secondary = this.getSecondaryTool();
+            if (secondary.hitOnHold && secondary.hitsPerSecond > 0) {
+                this.onToolSelected(secondary.id);
+                this.secondaryHoldMineCooldownMs -= deltaMs;
+                const secondaryIntervalMs = 1000 / secondary.hitsPerSecond;
+                while (this.secondaryHoldMineCooldownMs <= 0) {
+                    this.mineAtPointer(this.secondaryMiningPointer, 'hold');
+                    this.secondaryHoldMineCooldownMs += secondaryIntervalMs;
+                }
+            }
         }
     }
 
@@ -328,6 +371,10 @@ export class GameScene {
         if (event.button === 1) {
             event.preventDefault();
         }
+    };
+
+    private onCanvasContextMenu = (event: MouseEvent): void => {
+        event.preventDefault();
     };
 
     private onWheelZoom = (event: WheelEvent): void => {
