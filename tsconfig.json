@@ -3,6 +3,8 @@
         "target": "ES2022",
         "module": "ESNext",
         "moduleResolution": "Bundler",
+        "allowJs": true,
+        "checkJs": false,
         "strict": true,
         "skipLibCheck": true,
         "noEmit": true,
@@ -11,8 +13,11 @@
         ]
     },
     "include": [
-        "apps/**/*",
-        "scripts/**/*",
+        "scripts/**/*.js",
         "vite.config.ts"
+    ],
+    "exclude": [
+        "apps/**",
+        "node_modules"
     ]
 }
