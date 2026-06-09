@@ -239,7 +239,8 @@ export class WorldModel {
     getBeaconPlacementFailureReason(x: number, y: number): 'too_far' | 'not_open' | 'already_exists' | 'unknown_tile' {
         const tile = this.getTile(x, y);
         if (!tile) return 'unknown_tile';
-        if (tile.solid) return 'not_open';
+        // Allow placement on open tiles or mineable frontier solids (breakable tiles)
+        if (tile.solid && !this.isMineableFrontierSolid(x, y)) return 'not_open';
         if (tile.visibility === 'Unknown') return 'not_open';
         if (this.beacons.some((entry) => entry.x === x && entry.y === y)) return 'already_exists';
 
@@ -257,7 +258,8 @@ export class WorldModel {
     placeBeacon(x: number, y: number): SavedBeacon | null {
         this.ensureWorldContainsTile(x, y);
         const tile = this.getTile(x, y);
-        if (!tile || tile.solid) return null;
+        // Allow placement on open tiles or mineable frontier solids (breakable tiles)
+        if (!tile || (tile.solid && !this.isMineableFrontierSolid(x, y))) return null;
         if (tile.visibility === 'Unknown') return null;
         if (this.beacons.some((entry) => entry.x === x && entry.y === y)) return null;
 
@@ -270,8 +272,12 @@ export class WorldModel {
         const distance = Math.hypot(x - source.x, y - source.y);
         if (distance > MAX_LINK_DISTANCE) return null;
 
-        const path = this.findOpenPath(source.x, source.y, x, y, MAX_LINK_DISTANCE * 6);
-        if (!path) return null;
+        // For open tiles, require a path; for breakable tiles, skip path requirement
+        let path: Array<{ x: number; y: number }> | null = null;
+        if (!tile.solid) {
+            path = this.findOpenPath(source.x, source.y, x, y, MAX_LINK_DISTANCE * 6);
+            if (!path) return null;
+        }
 
         const beaconId = `beacon-${this.nextBeaconIndex++}`;
         const beaconEntityId = `entity-${beaconId}`;
@@ -293,7 +299,9 @@ export class WorldModel {
             parentId: parentEntityId,
         });
 
-        this.applyBeaconPathLighting(path);
+        if (path) {
+            this.applyBeaconPathLighting(path);
+        }
         this.applyEntityVisibility();
         this.markModifiedAt(x, y);
         return { ...beacon };

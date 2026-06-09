@@ -7,12 +7,13 @@ import { GameMetaStore } from './meta/GameMetaStore';
 import { createMapControlPanel } from './ui/MapControlPanel';
 import { createInventoryPanel } from './ui/inventory/InventoryPanel';
 import { createInventoryItemDetailsWindow } from './ui/inventory/InventoryItemDetailsWindow';
+import { createResourcesPanel } from './ui/ResourcesPanel';
 import type { MinimapWindow } from './ui/MinimapWindow';
 import { createToolInspectorPanel } from './ui/ToolInspectorPanel';
 import { createWindowControlRail } from './ui/WindowControlRail';
 import { createDebugGraphWindow } from './ui/DebugGraphWindow';
 import { ViewportSpace } from './core/ViewportSpace';
-import { getInventoryItemDefinition } from './inventory/InventoryModel';
+import { getInventoryItemDefinition, getTotalResourceCount, createDebugInventoryState } from './inventory/InventoryModel';
 import {
     createWorldAutosave,
     getDropDefinitionIdForBiome,
@@ -59,7 +60,6 @@ export async function bootstrapGame(): Promise<void> {
 
     let mainActionToolId = simulation.tools.getActiveTool().id;
 
-    let inventoryPanel: ReturnType<typeof createInventoryPanel> | null = null;
     let toolInspector: ReturnType<typeof createToolInspectorPanel> | null = null;
     let onToolEquippedExternally: (toolId: string) => void = () => { };
     const scene = new GameScene(
@@ -74,6 +74,11 @@ export async function bootstrapGame(): Promise<void> {
             inventoryPanel?.setEquippedTool(next.id);
             toolInspector?.setActiveTool(next.id);
             onToolEquippedExternally(next.id);
+        },
+        () => {
+            // Get available ore - will be set when inventory panel is created
+            if (!inventoryPanel) return 0;
+            return getTotalResourceCount(inventoryPanel.getState(), 'debug-asteroid-ore') ?? 0;
         },
     );
     scene.initialize();
@@ -278,6 +283,100 @@ export async function bootstrapGame(): Promise<void> {
     document.body.appendChild(actionBar.root);
     document.body.appendChild(actionHotbar);
 
+    let inventoryItemDetails: ReturnType<typeof createInventoryItemDetailsWindow> | null = null;
+    let inventoryPanel: ReturnType<typeof createInventoryPanel> | null = null;
+    let resourcesPanel: ReturnType<typeof createResourcesPanel> | null = null;
+    let panel: ReturnType<typeof createMapControlPanel> | null = null;
+
+    toolInspector = createToolInspectorPanel({
+        tools: WEAPON_DEFINITIONS,
+        initialToolId: simulation.tools.getActiveTool().id,
+        initialWindowState: initialToolInspector,
+        onWindowStateChange: (state) => {
+            metaStore.updateToolInspector(state);
+        },
+    });
+
+    inventoryItemDetails = createInventoryItemDetailsWindow({
+        initialWindowState: initialInventoryItemDetails,
+        onWindowStateChange: (state) => {
+            metaStore.updateInventoryItemDetails(state);
+        },
+        onEquipTool: (toolId) => {
+            applyEquippedTool(toolId, true);
+        },
+    });
+    inventoryItemDetails.clearSelection();
+
+    inventoryPanel = createInventoryPanel({
+        initialEquippedToolId: simulation.tools.getActiveTool().id,
+        initialWindowState: initialInventory,
+        onWindowStateChange: (state) => {
+            metaStore.updateInventory(state);
+        },
+        onEquipTool: (toolId) => {
+            applyEquippedTool(toolId, true);
+        },
+        onInspectItem: (selection) => {
+            inventoryItemDetails?.setSelection(selection);
+            inventoryItemDetails?.open();
+        },
+    });
+
+    // Set inventory on simulation for beacon cost checks
+    simulation.inventory = inventoryPanel.getState();
+
+    // Now create the map panel UI with the inventory
+    panel = createMapControlPanel({
+        initialSeed: simulation.world.getSeed(),
+        weapons: WEAPON_DEFINITIONS,
+        initialWeaponId: simulation.tools.getActiveTool().id,
+        initialWindowState: initialMapControls,
+        inventory: inventoryPanel?.getState() ?? createDebugInventoryState(),
+        onWindowStateChange: (state) => {
+            metaStore.updateMapControls(state);
+        },
+        onSelectWeapon: (weaponId) => {
+            applyEquippedTool(weaponId, true);
+            const next = WEAPON_DEFINITIONS.find((entry) => entry.id === weaponId);
+            if (!next) return;
+            panel?.setStatus(`Selected weapon: ${next.name}.`);
+        },
+        onGenerate: (seed) => {
+            transport.send({ type: 'GenerateWorld', seed });
+            panel?.setStatus(`Generated map with seed ${seed}.`);
+        },
+        onSave: () => {
+            saveSnapshot(simulation.world.toSnapshot());
+            panel?.setStatus(`Saved map with seed ${simulation.world.getSeed()}.`);
+        },
+        onCenterBase: () => {
+            scene.centerCameraOnBase();
+            minimap.refresh();
+        },
+        onBuild: (itemId: string) => {
+            if (itemId === 'beacon') {
+                panel?.setStatus('Click right on a tile to place a beacon in build mode');
+            }
+        },
+    });
+
+    // Create resources panel in top-left corner
+    resourcesPanel = createResourcesPanel({
+        inventoryState: inventoryPanel.getState(),
+    });
+
+    // Refresh resources panel when inventory changes
+    const inventoryAddItem = inventoryPanel.addItem.bind(inventoryPanel);
+    inventoryPanel.addItem = (definitionId: string, quantity: number) => {
+        const added = inventoryAddItem(definitionId, quantity);
+        if (added > 0) {
+            resourcesPanel?.update();
+        }
+        return added;
+    };
+
+    // NOW set up event handler after all UI is created
     transport.onEvent((event) => {
         if (event.type === 'WorldChunkDirty' || event.type === 'WorldGenerated') {
             minimap.refresh();
@@ -319,79 +418,16 @@ export async function bootstrapGame(): Promise<void> {
                 'not_open': 'Beacon must be placed in open space',
                 'already_exists': 'Beacon already exists at this location',
                 'unknown_tile': 'Cannot place beacon here',
+                'insufficient_ore': 'Not enough ore (need 10)',
             }[event.reason];
             panel.setStatus(`Cannot place beacon: ${reasonText}`);
         }
 
         if (event.type === 'BeaconPlaced') {
-            panel.setStatus(`Beacon placed at (${event.x}, ${event.y})`);
+            panel.setStatus(`Beacon placed at (${event.x}, ${event.y}) - Cost: 10 ore`);
+            resourcesPanel?.update();
             minimap.refresh();
         }
-    });
-
-    let inventoryItemDetails: ReturnType<typeof createInventoryItemDetailsWindow> | null = null;
-
-    const panel = createMapControlPanel({
-        initialSeed: simulation.world.getSeed(),
-        weapons: WEAPON_DEFINITIONS,
-        initialWeaponId: simulation.tools.getActiveTool().id,
-        initialWindowState: initialMapControls,
-        onWindowStateChange: (state) => {
-            metaStore.updateMapControls(state);
-        },
-        onSelectWeapon: (weaponId) => {
-            applyEquippedTool(weaponId, true);
-            const next = WEAPON_DEFINITIONS.find((entry) => entry.id === weaponId);
-            if (!next) return;
-            panel.setStatus(`Selected weapon: ${next.name}.`);
-        },
-        onGenerate: (seed) => {
-            transport.send({ type: 'GenerateWorld', seed });
-            panel.setStatus(`Generated map with seed ${seed}.`);
-        },
-        onSave: () => {
-            saveSnapshot(simulation.world.toSnapshot());
-            panel.setStatus(`Saved map with seed ${simulation.world.getSeed()}.`);
-        },
-        onCenterBase: () => {
-            scene.centerCameraOnBase();
-            minimap.refresh();
-        },
-    });
-
-    toolInspector = createToolInspectorPanel({
-        tools: WEAPON_DEFINITIONS,
-        initialToolId: simulation.tools.getActiveTool().id,
-        initialWindowState: initialToolInspector,
-        onWindowStateChange: (state) => {
-            metaStore.updateToolInspector(state);
-        },
-    });
-
-    inventoryItemDetails = createInventoryItemDetailsWindow({
-        initialWindowState: initialInventoryItemDetails,
-        onWindowStateChange: (state) => {
-            metaStore.updateInventoryItemDetails(state);
-        },
-        onEquipTool: (toolId) => {
-            applyEquippedTool(toolId, true);
-        },
-    });
-    inventoryItemDetails.clearSelection();
-
-    inventoryPanel = createInventoryPanel({
-        initialEquippedToolId: simulation.tools.getActiveTool().id,
-        initialWindowState: initialInventory,
-        onWindowStateChange: (state) => {
-            metaStore.updateInventory(state);
-        },
-        onEquipTool: (toolId) => {
-            applyEquippedTool(toolId, true);
-        },
-        onInspectItem: (selection) => {
-            inventoryItemDetails?.setSelection(selection);
-            inventoryItemDetails?.open();
-        },
     });
 
     const topMenu = createTopMenu({

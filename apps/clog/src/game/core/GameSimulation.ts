@@ -1,10 +1,13 @@
 import type { GameCommand, GameEvent } from './protocol';
+import type { InventoryState } from '../inventory/InventoryModel';
 import { ToolComponent } from './ToolComponent';
 import { WorldModel } from '../world/WorldModel';
+import { getTotalResourceCount, deductResource } from '../inventory/InventoryModel';
 
 export class GameSimulation {
     readonly world: WorldModel;
     readonly tools: ToolComponent;
+    inventory: InventoryState | null = null;
 
     constructor(world?: WorldModel) {
         this.world = world ?? new WorldModel();
@@ -55,6 +58,21 @@ export class GameSimulation {
         }
 
         if (command.type === 'PlaceBeacon') {
+            const BEACON_ORE_COST = 10;
+            if (this.inventory) {
+                const oreCount = getTotalResourceCount(this.inventory, 'debug-asteroid-ore');
+                if (oreCount < BEACON_ORE_COST) {
+                    return [
+                        {
+                            type: 'BeaconPlacementFailed',
+                            x: command.x,
+                            y: command.y,
+                            reason: 'insufficient_ore',
+                        },
+                    ];
+                }
+            }
+
             const placed = this.world.placeBeacon(command.x, command.y);
             if (!placed) {
                 const reason = this.world.getBeaconPlacementFailureReason(command.x, command.y);
@@ -67,6 +85,11 @@ export class GameSimulation {
                     },
                 ];
             }
+
+            if (this.inventory) {
+                deductResource(this.inventory, 'debug-asteroid-ore', BEACON_ORE_COST);
+            }
+
             return [
                 {
                     type: 'BeaconPlaced',

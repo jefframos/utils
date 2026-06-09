@@ -3,6 +3,7 @@ export type ContextMenuItem = {
     label: string;
     onSelect: () => void;
     disabled?: boolean;
+    disabledReason?: string;
 };
 
 export type ContextMenuState = {
@@ -38,6 +39,9 @@ export function createContextMenuTemplate(className = 'context-menu-template'): 
             button.textContent = item.label;
             button.setAttribute('role', 'menuitem');
             button.disabled = item.disabled === true;
+            if (item.disabledReason) {
+                button.title = item.disabledReason;
+            }
             button.addEventListener('click', () => {
                 if (button.disabled) return;
                 item.onSelect();

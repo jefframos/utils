@@ -9,8 +9,12 @@ export {
     moveInventoryItem,
     normalizeInventoryId,
     setEquippedTool,
+    getTotalResourceCount,
+    getAllResources,
+    deductResource,
     type InventoryContainer,
     type InventoryState,
+    type ResourceType,
 } from './state/InventoryState';
 
 export {

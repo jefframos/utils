@@ -30,6 +30,7 @@ export type InventoryPanel = {
     setEquippedTool: (toolId: string) => void;
     addItem: (definitionId: string, quantity: number) => number;
     destroy: () => void;
+    getState: () => InventoryState;
 };
 
 const DEFAULT_CELL_SIZE = 42;
@@ -115,6 +116,7 @@ export function createInventoryPanel(options: InventoryPanelOptions): InventoryP
         destroy: () => {
             frame.destroy();
         },
+        getState: () => state,
     };
 
     function createSection(inventoryId: string, section: InventorySection, title: string, currentState: InventoryState): HTMLElement {

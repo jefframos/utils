@@ -46,6 +46,7 @@ export class GameScene {
         private readonly transport: GameTransport,
         private readonly getPrimaryTool: () => ToolDefinition,
         private readonly onToolSelected: (toolId: string) => void,
+        private readonly getAvailableOre: () => number = () => 0,
     ) {
         this.gameCamera = new GameCamera(this.app, this.camera);
         this.viewportSpace = ViewportSpace.initialize(this.app, this.gameCamera);
@@ -350,6 +351,11 @@ export class GameScene {
         const tileX = Math.floor(worldPos.x / TILE_SIZE);
         const tileY = Math.floor(worldPos.y / TILE_SIZE);
 
+        const tile = this.world.getTile(tileX, tileY);
+        const isExplored = tile && tile.visibility !== 'Unknown';
+        const hasEnoughOre = this.getAvailableOre() >= 10;
+        const canPlaceBeacon = isExplored && hasEnoughOre;
+
         this.worldContextMenu.open({
             x: event.clientX,
             y: event.clientY,
@@ -357,6 +363,8 @@ export class GameScene {
                 {
                     id: 'place-beacon',
                     label: 'Add Beacon',
+                    disabled: !canPlaceBeacon,
+                    disabledReason: !isExplored ? 'Area not explored' : !hasEnoughOre ? 'Need 10 ore' : undefined,
                     onSelect: () => {
                         this.transport.send({ type: 'PlaceBeacon', x: tileX, y: tileY });
                     },

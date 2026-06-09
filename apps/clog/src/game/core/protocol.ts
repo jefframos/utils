@@ -66,7 +66,7 @@ export type BeaconPlacementFailedEvent = {
     type: 'BeaconPlacementFailed';
     x: number;
     y: number;
-    reason: 'too_far' | 'not_open' | 'already_exists' | 'unknown_tile';
+    reason: 'too_far' | 'not_open' | 'already_exists' | 'unknown_tile' | 'insufficient_ore';
 };
 
 export type GameEvent = WorldChunkDirtyEvent | TileMinedEvent | TileDamagedEvent | WorldGeneratedEvent | BeaconPlacedEvent | BeaconPlacementFailedEvent;

@@ -213,3 +213,55 @@ function createItem(definitionId: string, location: InventoryLocation, quantity:
         location: { ...location, inventoryId: normalizeInventoryId(location.inventoryId) },
     };
 }
+
+export function getTotalResourceCount(state: InventoryState, resourceId: string, inventoryId?: string): number {
+    const invId = normalizeInventoryId(inventoryId);
+    const items = state.items.filter((item) => {
+        return normalizeInventoryId(item.location.inventoryId) === invId && item.definitionId === resourceId;
+    });
+    return items.reduce((sum, item) => sum + item.quantity, 0);
+}
+
+export type ResourceType = 'debug-asteroid-ore' | 'debug-ice-shard' | 'debug-scrap' | 'debug-battery';
+
+export function getAllResources(state: InventoryState, inventoryId?: string): Record<ResourceType, number> {
+    const invId = normalizeInventoryId(inventoryId);
+    const resources: Record<ResourceType, number> = {
+        'debug-asteroid-ore': 0,
+        'debug-ice-shard': 0,
+        'debug-scrap': 0,
+        'debug-battery': 0,
+    };
+
+    for (const resource of Object.keys(resources) as ResourceType[]) {
+        resources[resource] = getTotalResourceCount(state, resource, invId);
+    }
+
+    return resources;
+}
+
+export function deductResource(state: InventoryState, resourceId: string, amount: number, inventoryId?: string): boolean {
+    const invId = normalizeInventoryId(inventoryId);
+    const total = getTotalResourceCount(state, resourceId, invId);
+    if (total < amount) return false;
+
+    let remaining = amount;
+    const items = state.items
+        .filter((item) => normalizeInventoryId(item.location.inventoryId) === invId && item.definitionId === resourceId)
+        .sort((a, b) => {
+            const sectionOrder = a.location.section === 'hotbar' ? 0 : 1;
+            const otherSectionOrder = b.location.section === 'hotbar' ? 0 : 1;
+            if (sectionOrder !== otherSectionOrder) return sectionOrder - otherSectionOrder;
+            return (a.location.y - b.location.y) || (a.location.x - b.location.x);
+        });
+
+    for (const item of items) {
+        if (remaining <= 0) break;
+        const deduct = Math.min(item.quantity, remaining);
+        item.quantity -= deduct;
+        remaining -= deduct;
+    }
+
+    state.items = state.items.filter((item) => item.quantity > 0);
+    return true;
+}
