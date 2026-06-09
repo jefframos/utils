@@ -13,6 +13,7 @@ type MinimapWindowOptions = {
     metaStore: GameMetaStore;
     getViewportRect: () => WorldViewportRect;
     onNavigate: (tileX: number, tileY: number) => void;
+    onPlaceBeacon?: (tileX: number, tileY: number) => void;
 };
 
 export type MinimapWindow = {
@@ -23,7 +24,7 @@ export type MinimapWindow = {
 };
 
 export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindow {
-    const { world, metaStore, getViewportRect, onNavigate } = options;
+    const { world, metaStore, getViewportRect, onNavigate, onPlaceBeacon } = options;
     // Start at a pannable minimap zoom instead of full-world fit.
     const zoomSteps = [0.25, 0.5, 1, 2, 4, 8] as const;
     const BASE_VIEW_HEIGHT_TILES = 80;
@@ -83,7 +84,7 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
     const controls = createWindowControlRail({ orientation: 'vertical', className: 'minimap-controls-rail' });
     const biomeFillColors = new Map<number, string>();
 
-    const makeIcon = (name: 'plus' | 'minus' | 'eye' | 'eyeOff' | 'bug' | 'centerBase' | 'centerViewport'): string => {
+    const makeIcon = (name: 'plus' | 'minus' | 'eye' | 'eyeOff' | 'bug' | 'centerBase' | 'centerViewport' | 'fitVisible' | 'fitFull'): string => {
         if (name === 'plus') {
             return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="square"/></svg>';
         }
@@ -101,6 +102,12 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
         }
         if (name === 'centerViewport') {
             return '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="6" width="14" height="12" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 3v4M12 17v4M2 12h4M18 12h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
+        }
+        if (name === 'fitVisible') {
+            return '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8 9h8M8 12h8M8 15h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+        }
+        if (name === 'fitFull') {
+            return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><rect x="7" y="7" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
         }
         return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 10h8v9H8z" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9.5 10V8.7a2.5 2.5 0 0 1 5 0V10" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 5.2L8 3.5M14 5.2L16 3.5M7 12H5M19 12h-2M7 15H5M19 15h-2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="11" cy="13.5" r="0.8" fill="currentColor"/><circle cx="13" cy="13.5" r="0.8" fill="currentColor"/></svg>';
     };
@@ -121,6 +128,31 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
     const panByTiles = (dxTiles: number, dyTiles: number) => {
         minimapCenterX -= dxTiles;
         minimapCenterY -= dyTiles;
+    };
+
+    const fitRegion = (left: number, top: number, right: number, bottom: number) => {
+        const widthTiles = Math.max(1, right - left);
+        const heightTiles = Math.max(1, bottom - top);
+        minimapCenterX = left + widthTiles * 0.5;
+        minimapCenterY = top + heightTiles * 0.5;
+
+        const aspect = renderHeight > 0 ? renderWidth / renderHeight : 1;
+        const maxZoomForHeight = BASE_VIEW_HEIGHT_TILES / heightTiles;
+        const maxZoomForWidth = (BASE_VIEW_HEIGHT_TILES * aspect) / widthTiles;
+        const maxZoomToFit = Math.max(zoomSteps[0], Math.min(maxZoomForHeight, maxZoomForWidth));
+
+        let nextZoomLevel = 0;
+        for (let i = 0; i < zoomSteps.length; i++) {
+            if (zoomSteps[i] <= maxZoomToFit) {
+                nextZoomLevel = i;
+            }
+        }
+
+        metaStore.updateMinimap({
+            centerX: minimapCenterX,
+            centerY: minimapCenterY,
+            zoomLevel: nextZoomLevel,
+        });
     };
 
     const getCurrentTransform = () => {
@@ -157,11 +189,19 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
         return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0-6 6c0 4.3 6 12 6 12s6-7.7 6-12a6 6 0 0 0-6-6z" fill="${color}" stroke="#1f2937" stroke-width="1.2"/><circle cx="12" cy="9" r="2.3" fill="#e0f2fe"/></svg>`;
     };
 
-    const markerHitTest = (px: number, py: number, startX: number, startY: number, pixelPerTile: number): string | null => {
+    const markerHitTest = (
+        px: number,
+        py: number,
+        startX: number,
+        startY: number,
+        pixelPerTile: number,
+        offsetX: number,
+        offsetY: number,
+    ): string | null => {
         for (let i = markers.length - 1; i >= 0; i--) {
             const marker = markers[i];
-            const markerPx = (marker.x + 0.5 - startX) * pixelPerTile;
-            const markerPy = (marker.y + 0.5 - startY) * pixelPerTile;
+            const markerPx = offsetX + (marker.x + 0.5 - startX) * pixelPerTile;
+            const markerPy = offsetY + (marker.y + 0.5 - startY) * pixelPerTile;
             const radius = Math.max(5, pixelPerTile * 0.45);
             const dx = px - markerPx;
             const dy = py - markerPy;
@@ -247,9 +287,13 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
 
     const zoomInButton = controls.createButton({ iconHtml: makeIcon('plus'), tooltip: 'Zoom in', className: 'minimap-rail-button' });
 
+    const fitVisibleButton = controls.createButton({ iconHtml: makeIcon('fitVisible'), tooltip: 'Fit visible world', className: 'minimap-rail-button' });
+
+    const fitFullButton = controls.createButton({ iconHtml: makeIcon('fitFull'), tooltip: 'Fit full world', className: 'minimap-rail-button' });
+
     const debugLogButton = controls.createButton({ iconHtml: makeIcon('bug'), tooltip: 'Log minimap camera debug', className: 'minimap-rail-button' });
 
-    controls.root.append(centerViewportButton, centerBaseButton, zoomInButton, zoomOutButton, revealToggle, debugLogButton);
+    controls.root.append(centerViewportButton, centerBaseButton, fitVisibleButton, fitFullButton, zoomInButton, zoomOutButton, revealToggle, debugLogButton);
     body.append(canvas, controls.root, markerStrip);
     frame.content.append(body);
 
@@ -276,7 +320,19 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
 
         const pixelPerTile = renderHeight / viewHeightTiles;
 
-        return { pixelPerTile, startX, startY, endX, endY, zoomLevel, zoom, viewWidthTiles, viewHeightTiles };
+        return {
+            pixelPerTile,
+            startX,
+            startY,
+            endX,
+            endY,
+            offsetX: 0,
+            offsetY: 0,
+            zoomLevel,
+            zoom,
+            viewWidthTiles,
+            viewHeightTiles,
+        };
     };
 
     const renderNow = () => {
@@ -296,16 +352,19 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
         }
 
         const viewport = getViewportRect();
-        const { pixelPerTile, startX, startY, endX, endY } = getMapTransform(viewport);
+        const { pixelPerTile, startX, startY, endX, endY, offsetX, offsetY } = getMapTransform(viewport);
         const tiles: Array<{ x: number; y: number; w: number; h: number; color: string }> = [];
+
+        const sampleStep = Math.max(1, Math.ceil(0.75 / Math.max(0.001, pixelPerTile)));
+        const renderTileSize = Math.max(1, pixelPerTile * sampleStep + 0.5);
 
         const minTileX = Math.max(0, Math.floor(startX));
         const maxTileX = Math.min(world.width - 1, Math.ceil(endX) - 1);
         const minTileY = Math.max(0, Math.floor(startY));
         const maxTileY = Math.min(world.height - 1, Math.ceil(endY) - 1);
 
-        for (let y = minTileY; y <= maxTileY; y++) {
-            for (let x = minTileX; x <= maxTileX; x++) {
+        for (let y = minTileY; y <= maxTileY; y += sampleStep) {
+            for (let x = minTileX; x <= maxTileX; x += sampleStep) {
                 const tile = world.getTile(x, y);
                 if (!tile) continue;
 
@@ -323,31 +382,39 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
                     }
                 }
 
-                const px = (x - startX) * pixelPerTile;
-                const py = (y - startY) * pixelPerTile;
-                tiles.push({
+                const px = offsetX + (x - startX) * pixelPerTile;
+                const py = offsetY + (y - startY) * pixelPerTile;
+                const renderTile = {
                     x: px,
                     y: py,
-                    w: pixelPerTile + 0.5,
-                    h: pixelPerTile + 0.5,
+                    w: renderTileSize,
+                    h: renderTileSize,
                     color,
-                });
+                };
+                tiles.push(renderTile);
             }
         }
 
-        const baseX = (world.baseX + 0.5 - startX) * pixelPerTile;
-        const baseY = (world.baseY + 0.5 - startY) * pixelPerTile;
+        const baseX = offsetX + (world.baseX + 0.5 - startX) * pixelPerTile;
+        const baseY = offsetY + (world.baseY + 0.5 - startY) * pixelPerTile;
         const baseRadius = Math.max(2, pixelPerTile);
         const renderMarkers = markers.map((marker) => ({
-            x: (marker.x + 0.5 - startX) * pixelPerTile,
-            y: (marker.y + 0.5 - startY) * pixelPerTile,
+            x: offsetX + (marker.x + 0.5 - startX) * pixelPerTile,
+            y: offsetY + (marker.y + 0.5 - startY) * pixelPerTile,
             radius: Math.max(4, pixelPerTile * 0.45),
             color: getMarkerColor(marker.colorKey),
             selected: marker.id === selectedMarkerId,
         }));
+        const beaconMarkers = world.getBeacons().map((beacon) => ({
+            x: offsetX + (beacon.x + 0.5 - startX) * pixelPerTile,
+            y: offsetY + (beacon.y + 0.5 - startY) * pixelPerTile,
+            radius: Math.max(3, pixelPerTile * 0.35),
+            color: '#f59e0b',
+            selected: false,
+        }));
 
-        const vx = (viewport.left - startX) * pixelPerTile;
-        const vy = (viewport.top - startY) * pixelPerTile;
+        const vx = offsetX + (viewport.left - startX) * pixelPerTile;
+        const vy = offsetY + (viewport.top - startY) * pixelPerTile;
         const vw = Math.max(2, (viewport.right - viewport.left) * pixelPerTile);
         const vh = Math.max(2, (viewport.bottom - viewport.top) * pixelPerTile);
 
@@ -356,13 +423,14 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
             height: renderHeight,
             backgroundColor: '#02040a',
             tiles,
+            chunks: undefined,
             base: {
                 x: baseX,
                 y: baseY,
                 radius: baseRadius,
                 color: '#93c5fd',
             },
-            markers: renderMarkers,
+            markers: [...renderMarkers, ...beaconMarkers],
             viewport: {
                 x: vx,
                 y: vy,
@@ -421,6 +489,17 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
             metaStore.updateMinimap({ zoomLevel: next });
         }
         syncMinimapMeta();
+        render();
+    });
+
+    fitVisibleButton.addEventListener('click', () => {
+        const viewport = getViewportRect();
+        fitRegion(viewport.left, viewport.top, viewport.right, viewport.bottom);
+        render();
+    });
+
+    fitFullButton.addEventListener('click', () => {
+        fitRegion(0, 0, world.width, world.height);
         render();
     });
 
@@ -493,10 +572,16 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
         const px = (event.clientX - rect.left) * dpr;
         const py = (event.clientY - rect.top) * dpr;
         const viewport = getViewportRect();
-        const { pixelPerTile, startX, startY } = getMapTransform(viewport);
-        const tileX = Math.floor(startX + px / pixelPerTile);
-        const tileY = Math.floor(startY + py / pixelPerTile);
-        const hitMarkerId = markerHitTest(px, py, startX, startY, pixelPerTile);
+        const { pixelPerTile, startX, startY, offsetX, offsetY, viewWidthTiles, viewHeightTiles } = getMapTransform(viewport);
+        const localPx = px - offsetX;
+        const localPy = py - offsetY;
+        if (localPx < 0 || localPy < 0 || localPx > viewWidthTiles * pixelPerTile || localPy > viewHeightTiles * pixelPerTile) {
+            return;
+        }
+
+        const tileX = Math.floor(startX + localPx / pixelPerTile);
+        const tileY = Math.floor(startY + localPy / pixelPerTile);
+        const hitMarkerId = markerHitTest(px, py, startX, startY, pixelPerTile, offsetX, offsetY);
 
         const items = [] as Array<{ id: string; label: string; onSelect: () => void; disabled?: boolean }>;
 
@@ -514,6 +599,14 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
             disabled: markers.length >= 8,
             onSelect: () => addMarkerAt(tileX, tileY),
         });
+
+        if (onPlaceBeacon) {
+            items.push({
+                id: 'add-beacon',
+                label: 'Place Beacon',
+                onSelect: () => onPlaceBeacon(tileX, tileY),
+            });
+        }
 
         contextMenu.open({ x: event.clientX, y: event.clientY, items });
     };
@@ -537,9 +630,14 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
         const px = (event.clientX - rect.left) * dpr;
         const py = (event.clientY - rect.top) * dpr;
         const viewport = getViewportRect();
-        const { pixelPerTile, startX, startY } = getMapTransform(viewport);
+        const { pixelPerTile, startX, startY, offsetX, offsetY, viewWidthTiles, viewHeightTiles } = getMapTransform(viewport);
+        const localPx = px - offsetX;
+        const localPy = py - offsetY;
+        if (localPx < 0 || localPy < 0 || localPx > viewWidthTiles * pixelPerTile || localPy > viewHeightTiles * pixelPerTile) {
+            return;
+        }
 
-        const hitMarkerId = markerHitTest(px, py, startX, startY, pixelPerTile);
+        const hitMarkerId = markerHitTest(px, py, startX, startY, pixelPerTile, offsetX, offsetY);
         if (hitMarkerId) {
             selectedMarkerId = hitMarkerId;
             rebuildMarkerStrip();
@@ -547,8 +645,8 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
             return;
         }
 
-        const tileX = Math.floor(startX + px / pixelPerTile);
-        const tileY = Math.floor(startY + py / pixelPerTile);
+        const tileX = Math.floor(startX + localPx / pixelPerTile);
+        const tileY = Math.floor(startY + localPy / pixelPerTile);
         onNavigate(tileX, tileY);
         render();
     });
@@ -561,8 +659,14 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
         const px = (event.clientX - rect.left) * dpr;
         const py = (event.clientY - rect.top) * dpr;
         const viewport = getViewportRect();
-        const { pixelPerTile, startX, startY } = getMapTransform(viewport);
-        const hitMarkerId = markerHitTest(px, py, startX, startY, pixelPerTile);
+        const { pixelPerTile, startX, startY, offsetX, offsetY, viewWidthTiles, viewHeightTiles } = getMapTransform(viewport);
+        const localPx = px - offsetX;
+        const localPy = py - offsetY;
+        if (localPx < 0 || localPy < 0 || localPx > viewWidthTiles * pixelPerTile || localPy > viewHeightTiles * pixelPerTile) {
+            return;
+        }
+
+        const hitMarkerId = markerHitTest(px, py, startX, startY, pixelPerTile, offsetX, offsetY);
         if (!hitMarkerId) return;
 
         selectedMarkerId = hitMarkerId;

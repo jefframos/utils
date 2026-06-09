@@ -10,6 +10,7 @@ import { createInventoryItemDetailsWindow } from './ui/inventory/InventoryItemDe
 import type { MinimapWindow } from './ui/MinimapWindow';
 import { createToolInspectorPanel } from './ui/ToolInspectorPanel';
 import { createWindowControlRail } from './ui/WindowControlRail';
+import { createDebugGraphWindow } from './ui/DebugGraphWindow';
 import { ViewportSpace } from './core/ViewportSpace';
 import { getInventoryItemDefinition } from './inventory/InventoryModel';
 import {
@@ -31,6 +32,7 @@ import { createGameEngine } from './engine/GameEngine';
 import { ModuleHost } from './modules/ModuleHost';
 import { createCanvasSurfaceModule } from './modules/builtin/CanvasSurfaceModule';
 import { createMinimapUiModule } from './modules/builtin/MinimapUiModule';
+import { getBiomeGenerationNodeGraphMermaid } from './world/noise';
 
 export async function bootstrapGame(): Promise<void> {
     const app = new Application();
@@ -56,7 +58,6 @@ export async function bootstrapGame(): Promise<void> {
     }
 
     let mainActionToolId = simulation.tools.getActiveTool().id;
-    let rightActionToolId = WEAPON_DEFINITIONS.find((entry) => entry.id !== mainActionToolId)?.id ?? mainActionToolId;
 
     let inventoryPanel: ReturnType<typeof createInventoryPanel> | null = null;
     let toolInspector: ReturnType<typeof createToolInspectorPanel> | null = null;
@@ -66,7 +67,6 @@ export async function bootstrapGame(): Promise<void> {
         simulation.world,
         transport,
         () => WEAPON_DEFINITIONS.find((entry) => entry.id === mainActionToolId) ?? simulation.tools.getActiveTool(),
-        () => WEAPON_DEFINITIONS.find((entry) => entry.id === rightActionToolId) ?? simulation.tools.getActiveTool(),
         (toolId) => {
             const next = WEAPON_DEFINITIONS.find((entry) => entry.id === toolId);
             if (!next) return;
@@ -134,12 +134,18 @@ export async function bootstrapGame(): Promise<void> {
             asteroidValleyEngine?: ReturnType<typeof createGameEngine>;
         }
     ).asteroidValleyEngine = engine;
+    (
+        window as Window & {
+            asteroidValleyBiomeGraphMermaid?: string;
+        }
+    ).asteroidValleyBiomeGraphMermaid = getBiomeGenerationNodeGraphMermaid();
 
     const minimapRef: { current: MinimapWindow | null } = { current: null };
 
     const moduleHost = new ModuleHost<{
         engine: ReturnType<typeof createGameEngine>;
         simulation: GameSimulation;
+        transport: LocalTransport;
         scene: GameScene;
         metaStore: GameMetaStore;
         minimapRef: { current: MinimapWindow | null };
@@ -155,6 +161,7 @@ export async function bootstrapGame(): Promise<void> {
     await moduleHost.startAll({
         engine,
         simulation,
+        transport,
         scene,
         metaStore,
         minimapRef,
@@ -177,20 +184,15 @@ export async function bootstrapGame(): Promise<void> {
     mainActionButton.type = 'button';
     mainActionButton.className = 'ui95-button action-hotbar-slot';
 
-    const rightActionButton = document.createElement('button');
-    rightActionButton.type = 'button';
-    rightActionButton.className = 'ui95-button action-hotbar-slot';
-
-    actionHotbar.append(mainActionButton, rightActionButton);
+    actionHotbar.append(mainActionButton);
 
     const renderActionHotbar = () => {
         const equippedId = simulation.tools.getActiveTool().id;
         const mainTool = WEAPON_DEFINITIONS.find((entry) => entry.id === mainActionToolId);
-        const rightTool = WEAPON_DEFINITIONS.find((entry) => entry.id === rightActionToolId);
 
         if (mainTool) {
-            mainActionButton.title = `Main action: ${mainTool.name}`;
-            mainActionButton.innerHTML = `<span class="action-hotbar-slot-label">LMB</span><span class="action-hotbar-slot-icon">${getToolIconSvg(mainTool.id)}</span>`;
+            mainActionButton.title = `Active tool: ${mainTool.name}`;
+            mainActionButton.innerHTML = `<span class="action-hotbar-slot-label">Tool</span><span class="action-hotbar-slot-icon">${getToolIconSvg(mainTool.id)}</span>`;
             const mainItemDef = getInventoryItemDefinition(mainTool.id);
             if (mainItemDef) {
                 mainActionButton.style.setProperty('--slot-backdrop', mainItemDef.view.backdrop);
@@ -198,24 +200,10 @@ export async function bootstrapGame(): Promise<void> {
             }
             mainActionButton.classList.toggle('is-equipped', mainTool.id === equippedId);
         }
-
-        if (rightTool) {
-            rightActionButton.title = `Right-click action: ${rightTool.name}`;
-            rightActionButton.innerHTML = `<span class="action-hotbar-slot-label">RMB</span><span class="action-hotbar-slot-icon">${getToolIconSvg(rightTool.id)}</span>`;
-            const rightItemDef = getInventoryItemDefinition(rightTool.id);
-            if (rightItemDef) {
-                rightActionButton.style.setProperty('--slot-backdrop', rightItemDef.view.backdrop);
-                rightActionButton.style.setProperty('--slot-tint', rightItemDef.view.tint);
-            }
-            rightActionButton.classList.toggle('is-equipped', rightTool.id === equippedId);
-        }
     };
 
     const setMainActionTool = (toolId: string) => {
         mainActionToolId = toolId;
-        if (rightActionToolId === mainActionToolId) {
-            rightActionToolId = WEAPON_DEFINITIONS.find((entry) => entry.id !== mainActionToolId)?.id ?? mainActionToolId;
-        }
         renderActionHotbar();
     };
 
@@ -241,10 +229,6 @@ export async function bootstrapGame(): Promise<void> {
         applyEquippedTool(mainActionToolId, true);
     });
 
-    rightActionButton.addEventListener('click', () => {
-        applyEquippedTool(rightActionToolId, false);
-    });
-
     const snapBaseButton = createActionButton('target', 'Snap To Base', 'Center camera on base tile');
     snapBaseButton.addEventListener('click', () => {
         scene.centerCameraOnBase();
@@ -263,14 +247,32 @@ export async function bootstrapGame(): Promise<void> {
     mapToggleButton.innerHTML = `<span class="action-button-icon" aria-hidden="true">${makeIconSvg('map')}</span>`;
 
     const debugToggleButton = createActionButton('debug', 'Debug', 'Show or hide camera debug crosshair');
-    const updateDebugToggleState = () => {
-        debugToggleButton.classList.toggle('is-active', scene.isDebugOverlayVisible());
-    };
-    debugToggleButton.addEventListener('click', () => {
-        scene.setDebugOverlayEnabled(!scene.isDebugOverlayVisible());
-        updateDebugToggleState();
+    const debugWindow = createDebugGraphWindow({
+        initialWindowState: {
+            open: false,
+            minimized: false,
+            left: Math.max(16, window.innerWidth - 640),
+            top: 112,
+            width: 560,
+            height: 440,
+        },
+        onWindowStateChange: () => {
+            debugToggleButton.classList.toggle('is-active', scene.isDebugOverlayVisible());
+        },
+        getModuleIds: () => moduleHost.listModuleIds(),
+        getBehaviorIds: () => engine.listBehaviorIds(),
+        getBiomeGraphMermaid: () => getBiomeGenerationNodeGraphMermaid(),
+        isOverlayEnabled: () => scene.isDebugOverlayVisible(),
+        onToggleOverlay: (enabled) => {
+            scene.setDebugOverlayEnabled(enabled);
+        },
     });
-    updateDebugToggleState();
+
+    debugToggleButton.addEventListener('click', () => {
+        debugWindow.toggle();
+        debugToggleButton.classList.toggle('is-active', scene.isDebugOverlayVisible());
+    });
+    debugToggleButton.classList.toggle('is-active', scene.isDebugOverlayVisible());
 
     actionBar.root.append(snapBaseButton, inventoryButton, mapToggleButton, debugToggleButton);
     document.body.appendChild(actionBar.root);
@@ -279,6 +281,10 @@ export async function bootstrapGame(): Promise<void> {
     transport.onEvent((event) => {
         if (event.type === 'WorldChunkDirty' || event.type === 'WorldGenerated') {
             minimap.refresh();
+
+            // Visibility-only exploration changes emit dirty chunks without TileMined/TileDamaged.
+            // Autosave here to persist fog-of-war progress from reveal actions.
+            worldAutosave.schedule();
         }
 
         if (event.type === 'TileDamaged') {
@@ -305,6 +311,21 @@ export async function bootstrapGame(): Promise<void> {
 
         if (event.type === 'TileMined') {
             worldAutosave.schedule();
+        }
+
+        if (event.type === 'BeaconPlacementFailed') {
+            const reasonText = {
+                'too_far': 'Beacon too far from base or nearest beacon',
+                'not_open': 'Beacon must be placed in open space',
+                'already_exists': 'Beacon already exists at this location',
+                'unknown_tile': 'Cannot place beacon here',
+            }[event.reason];
+            panel.setStatus(`Cannot place beacon: ${reasonText}`);
+        }
+
+        if (event.type === 'BeaconPlaced') {
+            panel.setStatus(`Beacon placed at (${event.x}, ${event.y})`);
+            minimap.refresh();
         }
     });
 

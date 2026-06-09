@@ -14,6 +14,10 @@ export type EngineBehavior = {
 export class BehaviorRuntime {
     private readonly behaviors = new Map<string, EngineBehavior>();
 
+    listBehaviorIds(): string[] {
+        return Array.from(this.behaviors.keys());
+    }
+
     register(behavior: EngineBehavior, context: BehaviorContext): void {
         this.behaviors.set(behavior.id, behavior);
         behavior.onInit?.(context);

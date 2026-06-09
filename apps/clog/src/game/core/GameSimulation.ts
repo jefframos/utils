@@ -24,7 +24,12 @@ export class GameSimulation {
                 tool.damageMode,
                 tool.bluntRadius,
             );
-            if (hits.length === 0) return [];
+            if (hits.length === 0) {
+                if (this.world.revealFromEmptyClick(command.x, command.y)) {
+                    return [{ type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() }];
+                }
+                return [];
+            }
 
             return [
                 { type: 'TileDamaged', hits },
@@ -45,6 +50,31 @@ export class GameSimulation {
             this.world.applySnapshot(command.snapshot);
             return [
                 { type: 'WorldGenerated', seed: this.world.getSeed() },
+                { type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() },
+            ];
+        }
+
+        if (command.type === 'PlaceBeacon') {
+            const placed = this.world.placeBeacon(command.x, command.y);
+            if (!placed) {
+                const reason = this.world.getBeaconPlacementFailureReason(command.x, command.y);
+                return [
+                    {
+                        type: 'BeaconPlacementFailed',
+                        x: command.x,
+                        y: command.y,
+                        reason,
+                    },
+                ];
+            }
+            return [
+                {
+                    type: 'BeaconPlaced',
+                    id: placed.id,
+                    x: placed.x,
+                    y: placed.y,
+                    parentId: placed.parentId,
+                },
                 { type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() },
             ];
         }

@@ -6,6 +6,10 @@ export class ModuleHost<TContext> {
     private readonly modules = new Map<string, RuntimeModule<TContext>>();
     private readonly cleanups = new Map<string, Cleanup>();
 
+    listModuleIds(): string[] {
+        return Array.from(this.modules.keys()).sort((a, b) => a.localeCompare(b));
+    }
+
     register(module: RuntimeModule<TContext>): void {
         this.modules.set(module.id, module);
     }

@@ -1,3 +1,4 @@
+import { BASE_START_X, BASE_START_Y } from '../config';
 import { GameSimulation } from '../core/GameSimulation';
 import {
     type GameMeta,
@@ -7,10 +8,11 @@ import {
     type MinimapWindowMeta,
     type ToolInspectorWindowMeta,
 } from '../meta/GameMetaStore';
-import type { WorldSnapshot } from '../world/WorldModel';
+import type { LegacyWorldSnapshot, SnapshotV2, WorldSnapshot } from '../world/WorldModel';
 
 const SAVE_KEY = 'asteroid-valley-save-v1';
 const META_COOKIE_KEY = 'asteroid-valley-meta-v1';
+let quotaWarningShown = false;
 
 function getCookie(name: string): string | null {
     const key = `${name}=`;
@@ -136,10 +138,77 @@ export function loadSnapshot(): WorldSnapshot | null {
     try {
         const raw = localStorage.getItem(SAVE_KEY);
         if (!raw) return null;
-        const parsed = JSON.parse(raw) as WorldSnapshot;
-        if (parsed && parsed.version === 1 && Number.isFinite(parsed.seed) && Array.isArray(parsed.savedTiles)) {
-            return parsed;
+        const parsed = JSON.parse(raw) as WorldSnapshot | SnapshotV2 | LegacyWorldSnapshot;
+        if (!parsed || !Number.isFinite(parsed.seed) || !Array.isArray(parsed.savedTiles)) {
+            return null;
         }
+
+        if (parsed.version === 1) {
+            return {
+                version: 3,
+                seed: parsed.seed,
+                width: 256,
+                height: 256,
+                savedTiles: parsed.savedTiles,
+                entities: [
+                    {
+                        id: 'entity-base',
+                        kind: 'base',
+                        mobility: 'static',
+                        x: BASE_START_X,
+                        y: BASE_START_Y,
+                        visibilityRadius: 7,
+                        parentId: null,
+                    },
+                ],
+            };
+        }
+
+        if (parsed.version === 2) {
+            const convertedEntities = [
+                {
+                    id: 'entity-base',
+                    kind: 'base' as const,
+                    mobility: 'static' as const,
+                    x: BASE_START_X,
+                    y: BASE_START_Y,
+                    visibilityRadius: 7,
+                    parentId: null,
+                },
+                ...(Array.isArray(parsed.beacons)
+                    ? parsed.beacons.map((beacon) => ({
+                        id: `entity-${beacon.id}`,
+                        kind: 'beacon' as const,
+                        mobility: 'static' as const,
+                        x: beacon.x,
+                        y: beacon.y,
+                        visibilityRadius: 4,
+                        parentId: beacon.parentId ? `entity-${beacon.parentId}` : 'entity-base',
+                    }))
+                    : []),
+            ];
+
+            return {
+                version: 3,
+                seed: parsed.seed,
+                width: Number.isFinite(parsed.width) ? parsed.width : 256,
+                height: Number.isFinite(parsed.height) ? parsed.height : 256,
+                savedTiles: parsed.savedTiles,
+                entities: convertedEntities,
+            };
+        }
+
+        if (parsed.version === 3) {
+            return {
+                version: 3,
+                seed: parsed.seed,
+                width: Number.isFinite(parsed.width) ? parsed.width : 256,
+                height: Number.isFinite(parsed.height) ? parsed.height : 256,
+                savedTiles: parsed.savedTiles,
+                entities: Array.isArray(parsed.entities) ? parsed.entities : [],
+            };
+        }
+
         return null;
     } catch {
         return null;
@@ -147,7 +216,56 @@ export function loadSnapshot(): WorldSnapshot | null {
 }
 
 export function saveSnapshot(snapshot: WorldSnapshot): void {
-    localStorage.setItem(SAVE_KEY, JSON.stringify(snapshot));
+    const tryWrite = (candidate: WorldSnapshot): boolean => {
+        try {
+            localStorage.setItem(SAVE_KEY, JSON.stringify(candidate));
+            return true;
+        } catch (error) {
+            if (!isQuotaExceededError(error)) {
+                throw error;
+            }
+            return false;
+        }
+    };
+
+    if (tryWrite(snapshot)) return;
+
+    const structuralSnapshot = compactSnapshotForStorage(snapshot, 'structural');
+    if (tryWrite(structuralSnapshot)) {
+        warnQuotaFallback('Saved compact structural snapshot (visibility-only progress omitted).');
+        return;
+    }
+
+    const minedOnlySnapshot = compactSnapshotForStorage(snapshot, 'mined-only');
+    if (tryWrite(minedOnlySnapshot)) {
+        warnQuotaFallback('Saved mined-only snapshot (exploration visibility omitted).');
+        return;
+    }
+
+    warnQuotaFallback('Autosave skipped: local storage quota exceeded.');
+}
+
+function isQuotaExceededError(error: unknown): boolean {
+    if (!(error instanceof DOMException)) return false;
+    return error.name === 'QuotaExceededError' || error.name === 'NS_ERROR_DOM_QUOTA_REACHED' || error.code === 22;
+}
+
+function warnQuotaFallback(message: string): void {
+    if (quotaWarningShown) return;
+    quotaWarningShown = true;
+    console.warn(`[Storage] ${message}`);
+}
+
+function compactSnapshotForStorage(snapshot: WorldSnapshot, mode: 'structural' | 'mined-only'): WorldSnapshot {
+    const savedTiles = mode === 'mined-only'
+        ? snapshot.savedTiles.filter((saved) => !saved.solid || saved.hp <= 0)
+        : snapshot.savedTiles;
+
+    return {
+        ...snapshot,
+        savedTiles,
+        entities: snapshot.entities,
+    };
 }
 
 export function createWorldAutosave(world: GameSimulation['world']): {

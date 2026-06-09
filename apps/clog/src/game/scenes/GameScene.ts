@@ -12,6 +12,7 @@ import { GameCamera, type WorldViewportRect } from '../camera/GameCamera';
 import { ViewportSpace } from '../core/ViewportSpace';
 import { WorldRenderer } from '../render/WorldRenderer';
 import { WorldModel } from '../world/WorldModel';
+import { createContextMenuTemplate } from '../ui/ContextMenuTemplate';
 
 export class GameScene {
     private static damagePopupFontInstalled = false;
@@ -34,19 +35,16 @@ export class GameScene {
     private isMiddlePanning = false;
     private readonly lastPanPointer = new Point();
     private isPrimaryMining = false;
-    private isSecondaryMining = false;
     private readonly primaryMiningPointer = new Point();
-    private readonly secondaryMiningPointer = new Point();
     private primaryHoldMineCooldownMs = 0;
-    private secondaryHoldMineCooldownMs = 0;
     private readonly damagePopups: Array<{ sprite: BitmapText; ttlMs: number; ageMs: number; velocityY: number }> = [];
+    private readonly worldContextMenu = createContextMenuTemplate();
 
     constructor(
         private readonly app: Application,
         private readonly world: WorldModel,
         private readonly transport: GameTransport,
         private readonly getPrimaryTool: () => ToolDefinition,
-        private readonly getSecondaryTool: () => ToolDefinition,
         private readonly onToolSelected: (toolId: string) => void,
     ) {
         this.gameCamera = new GameCamera(this.app, this.camera);
@@ -80,15 +78,19 @@ export class GameScene {
     }
 
     initialize(): void {
+        document.body.appendChild(this.worldContextMenu.getRoot());
         this.mountLayers();
         this.setupBackground();
         this.setupCameraStart();
+        this.world.ensureChunksAround(this.world.baseX, this.world.baseY, 1);
+        this.world.ensureChunksForViewport(this.getViewportWorldRectTiles(), 1);
         this.setupInput();
         this.setupTransport();
         this.setupDebugOverlay();
 
         this.renderer.flushDirtyChunks(this.camera.scale.x);
         this.app.ticker.add(() => {
+            this.world.ensureChunksForViewport(this.getViewportWorldRectTiles(), 1);
             this.renderer.flushDirtyChunks(this.camera.scale.x);
             this.updateHoldMining(this.app.ticker.deltaMS);
             this.updateDamagePopups(this.app.ticker.deltaMS);
@@ -234,18 +236,6 @@ export class GameScene {
             return;
         }
 
-        if (event.button === 2) {
-            this.isSecondaryMining = true;
-            this.secondaryMiningPointer.copyFrom(event.global);
-            this.secondaryHoldMineCooldownMs = 0;
-            const weapon = this.getSecondaryTool();
-            this.onToolSelected(weapon.id);
-            if (weapon.hitOnClick) {
-                this.mineAtPointer(this.secondaryMiningPointer, 'click');
-            }
-            return;
-        }
-
         if (event.button !== 1) return;
         this.isMiddlePanning = true;
         this.lastPanPointer.copyFrom(event.global);
@@ -254,9 +244,6 @@ export class GameScene {
     private onPointerMove(event: FederatedPointerEvent): void {
         if (this.isPrimaryMining) {
             this.primaryMiningPointer.copyFrom(event.global);
-        }
-        if (this.isSecondaryMining) {
-            this.secondaryMiningPointer.copyFrom(event.global);
         }
 
         if (!this.isMiddlePanning) return;
@@ -272,12 +259,6 @@ export class GameScene {
         if (event.button === 0) {
             this.isPrimaryMining = false;
             this.primaryHoldMineCooldownMs = 0;
-            return;
-        }
-
-        if (event.button === 2) {
-            this.isSecondaryMining = false;
-            this.secondaryHoldMineCooldownMs = 0;
             return;
         }
 
@@ -302,19 +283,6 @@ export class GameScene {
                 while (this.primaryHoldMineCooldownMs <= 0) {
                     this.mineAtPointer(this.primaryMiningPointer, 'hold');
                     this.primaryHoldMineCooldownMs += primaryIntervalMs;
-                }
-            }
-        }
-
-        if (this.isSecondaryMining) {
-            const secondary = this.getSecondaryTool();
-            if (secondary.hitOnHold && secondary.hitsPerSecond > 0) {
-                this.onToolSelected(secondary.id);
-                this.secondaryHoldMineCooldownMs -= deltaMs;
-                const secondaryIntervalMs = 1000 / secondary.hitsPerSecond;
-                while (this.secondaryHoldMineCooldownMs <= 0) {
-                    this.mineAtPointer(this.secondaryMiningPointer, 'hold');
-                    this.secondaryHoldMineCooldownMs += secondaryIntervalMs;
                 }
             }
         }
@@ -375,6 +343,26 @@ export class GameScene {
 
     private onCanvasContextMenu = (event: MouseEvent): void => {
         event.preventDefault();
+
+        const stagePoint = new Point();
+        this.app.renderer.events.mapPositionToPoint(stagePoint, event.clientX, event.clientY);
+        const worldPos = this.gameCamera.stageToWorld(stagePoint);
+        const tileX = Math.floor(worldPos.x / TILE_SIZE);
+        const tileY = Math.floor(worldPos.y / TILE_SIZE);
+
+        this.worldContextMenu.open({
+            x: event.clientX,
+            y: event.clientY,
+            items: [
+                {
+                    id: 'place-beacon',
+                    label: 'Add Beacon',
+                    onSelect: () => {
+                        this.transport.send({ type: 'PlaceBeacon', x: tileX, y: tileY });
+                    },
+                },
+            ],
+        });
     };
 
     private onWheelZoom = (event: WheelEvent): void => {

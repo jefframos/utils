@@ -6,6 +6,12 @@ export type MinimapRenderTile = {
     color: string;
 };
 
+export type MinimapRenderChunk = {
+    chunkX: number;
+    chunkY: number;
+    tiles: MinimapRenderTile[];
+};
+
 export type MinimapRenderMarker = {
     x: number;
     y: number;
@@ -19,6 +25,7 @@ export type MinimapRenderFrame = {
     height: number;
     backgroundColor: string;
     tiles: MinimapRenderTile[];
+    chunks?: MinimapRenderChunk[];
     base: {
         x: number;
         y: number;
@@ -66,9 +73,18 @@ function drawFrame(ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingConte
     ctx.fillStyle = frame.backgroundColor;
     ctx.fillRect(0, 0, frame.width, frame.height);
 
-    for (const tile of frame.tiles) {
-        ctx.fillStyle = tile.color;
-        ctx.fillRect(tile.x, tile.y, tile.w, tile.h);
+    if (frame.chunks && frame.chunks.length > 0) {
+        for (const chunk of frame.chunks) {
+            for (const tile of chunk.tiles) {
+                ctx.fillStyle = tile.color;
+                ctx.fillRect(tile.x, tile.y, tile.w, tile.h);
+            }
+        }
+    } else {
+        for (const tile of frame.tiles) {
+            ctx.fillStyle = tile.color;
+            ctx.fillRect(tile.x, tile.y, tile.w, tile.h);
+        }
     }
 
     ctx.fillStyle = frame.base.color;

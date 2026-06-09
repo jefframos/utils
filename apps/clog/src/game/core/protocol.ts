@@ -17,7 +17,13 @@ export type LoadWorldSnapshotCommand = {
     snapshot: WorldSnapshot;
 };
 
-export type GameCommand = MineTileCommand | GenerateWorldCommand | LoadWorldSnapshotCommand;
+export type PlaceBeaconCommand = {
+    type: 'PlaceBeacon';
+    x: number;
+    y: number;
+};
+
+export type GameCommand = MineTileCommand | GenerateWorldCommand | LoadWorldSnapshotCommand | PlaceBeaconCommand;
 
 export type WorldChunkDirtyEvent = {
     type: 'WorldChunkDirty';
@@ -48,7 +54,22 @@ export type WorldGeneratedEvent = {
     seed: number;
 };
 
-export type GameEvent = WorldChunkDirtyEvent | TileMinedEvent | TileDamagedEvent | WorldGeneratedEvent;
+export type BeaconPlacedEvent = {
+    type: 'BeaconPlaced';
+    id: string;
+    x: number;
+    y: number;
+    parentId: string | null;
+};
+
+export type BeaconPlacementFailedEvent = {
+    type: 'BeaconPlacementFailed';
+    x: number;
+    y: number;
+    reason: 'too_far' | 'not_open' | 'already_exists' | 'unknown_tile';
+};
+
+export type GameEvent = WorldChunkDirtyEvent | TileMinedEvent | TileDamagedEvent | WorldGeneratedEvent | BeaconPlacedEvent | BeaconPlacementFailedEvent;
 
 export interface GameTransport {
     send(command: GameCommand): void;

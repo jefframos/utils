@@ -10,6 +10,15 @@ export function createSolidTile(biome: BiomeId): Tile {
     };
 }
 
+export function createHiddenSpaceTile(biome: BiomeId): Tile {
+    return {
+        solid: false,
+        biome,
+        hp: 0,
+        visibility: 'Unknown',
+    };
+}
+
 export function carveOpen(tile: Tile): void {
     tile.solid = false;
     tile.visibility = 'Open';

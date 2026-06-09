@@ -4,10 +4,12 @@ import { type GameScene } from '../../scenes/GameScene';
 import { createMinimapWindow, type MinimapWindow } from '../../ui/MinimapWindow';
 import type { GameEngine } from '../../engine/GameEngine';
 import type { RuntimeModule } from '../RuntimeModule';
+import type { GameTransport } from '../../core/protocol';
 
 export type MinimapUiModuleContext = {
     engine: GameEngine;
     simulation: GameSimulation;
+    transport: GameTransport;
     scene: GameScene;
     metaStore: GameMetaStore;
     minimapRef: { current: MinimapWindow | null };
@@ -25,6 +27,10 @@ export function createMinimapUiModule(): RuntimeModule<MinimapUiModuleContext> {
                 getViewportRect: () => context.scene.getViewportWorldRectTiles(),
                 onNavigate: (tileX, tileY) => {
                     context.scene.centerCameraOnTile(tileX, tileY);
+                    minimap.refresh();
+                },
+                onPlaceBeacon: (tileX, tileY) => {
+                    context.transport.send({ type: 'PlaceBeacon', x: tileX, y: tileY });
                     minimap.refresh();
                 },
             });

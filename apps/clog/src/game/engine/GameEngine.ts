@@ -10,6 +10,7 @@ export type GameEngine = {
     surfaces: CanvasSurfaceRegistry;
     registerBehavior: (behavior: EngineBehavior) => void;
     unregisterBehavior: (behaviorId: string) => void;
+    listBehaviorIds: () => string[];
     start: () => void;
     stop: () => void;
     destroy: () => void;
@@ -51,6 +52,9 @@ export function createGameEngine(options: GameEngineOptions = {}): GameEngine {
         },
         unregisterBehavior: (behaviorId) => {
             behaviors.unregister(behaviorId, context);
+        },
+        listBehaviorIds: () => {
+            return behaviors.listBehaviorIds();
         },
         start: () => {
             if (running) return;
