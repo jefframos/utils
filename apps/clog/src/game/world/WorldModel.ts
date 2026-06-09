@@ -176,6 +176,41 @@ export class WorldModel {
         return { n, e, s, w, ne, se, sw, nw };
     }
 
+    edgeMaskSolid8(x: number, y: number): { n: boolean; e: boolean; s: boolean; w: boolean; ne: boolean; se: boolean; sw: boolean; nw: boolean } {
+        const n = this.isSolidTile(x, y - 1);
+        const e = this.isSolidTile(x + 1, y);
+        const s = this.isSolidTile(x, y + 1);
+        const w = this.isSolidTile(x - 1, y);
+        const ne = n && e && this.isSolidTile(x + 1, y - 1);
+        const se = s && e && this.isSolidTile(x + 1, y + 1);
+        const sw = s && w && this.isSolidTile(x - 1, y + 1);
+        const nw = n && w && this.isSolidTile(x - 1, y - 1);
+        return { n, e, s, w, ne, se, sw, nw };
+    }
+
+    isSolidTile(x: number, y: number): boolean {
+        const tile = this.getTile(x, y);
+        return !!tile && tile.solid;
+    }
+
+    edgeMaskMineable8(x: number, y: number): { n: boolean; e: boolean; s: boolean; w: boolean; ne: boolean; se: boolean; sw: boolean; nw: boolean } {
+        const n = this.isMineableFrontierSolid(x, y - 1);
+        const e = this.isMineableFrontierSolid(x + 1, y);
+        const s = this.isMineableFrontierSolid(x, y + 1);
+        const w = this.isMineableFrontierSolid(x - 1, y);
+        const ne = n && e && this.isMineableFrontierSolid(x + 1, y - 1);
+        const se = s && e && this.isMineableFrontierSolid(x + 1, y + 1);
+        const sw = s && w && this.isMineableFrontierSolid(x - 1, y + 1);
+        const nw = n && w && this.isMineableFrontierSolid(x - 1, y - 1);
+        return { n, e, s, w, ne, se, sw, nw };
+    }
+
+    isMineableFrontierSolid(x: number, y: number): boolean {
+        const tile = this.getTile(x, y);
+        if (!tile) return false;
+        return this.isMineableSolidTile(x, y, tile);
+    }
+
     isBiomeNearOpen(x: number, y: number): boolean {
         const tile = this.getTile(x, y);
         if (!tile || !tile.solid) return false;
@@ -328,7 +363,7 @@ export class WorldModel {
 
     private mineSingleAt(x: number, y: number, damage: number): TileDamageHit | null {
         const tile = this.getTile(x, y);
-        if (!tile || !this.isVisibleSolid(x, y)) return null;
+        if (!tile || !this.isMineableSolidTile(x, y, tile)) return null;
 
         const beforeHp = tile.hp;
         const opened = damageTile(tile, damage);
@@ -352,6 +387,12 @@ export class WorldModel {
             remainingHp: tile.hp,
             opened,
         };
+    }
+
+    private isMineableSolidTile(x: number, y: number, tile: Tile): boolean {
+        if (!tile.solid) return false;
+        // Only allow mining on the frontier touching the carved/open path.
+        return this.isBiomeNearOpen(x, y);
     }
 
     private resetTileDamage(x: number, y: number): void {

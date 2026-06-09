@@ -5,15 +5,27 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "dev:observe": "concurrently -k -n dev,test -c cyan,magenta \"npm run dev -- --host 127.0.0.1 --port 4173\" \"npm run test:watch\"",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:runtime": "playwright test",
+    "test:runtime:install": "playwright install chromium",
+    "check": "npm run typecheck && npm run test"
   },
   "dependencies": {
     "@pixi/tilemap": "^5.0.2",
     "pixi.js": "^8.9.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@vitest/coverage-v8": "^4.1.8",
+    "concurrently": "^10.0.3",
     "typescript": "^5.8.3",
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "vitest": "^4.1.8"
   }
 }

@@ -22,6 +22,6 @@ export const GAME_COLORS = {
 
 export const GAME_RULES = {
     // When false, tile damage behaves like Minecraft: if you stop/retarget, progress resets.
-    persistentTileDamage: false,
-    transientDamageWindowMs: 420,
+    persistentTileDamage: true,
+    transientDamageWindowMs: 5000,
 } as const;

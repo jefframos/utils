@@ -91,7 +91,7 @@ export function createInventoryItemDetailsWindow(options: InventoryItemDetailsWi
             if (selection.definition.toolId) {
                 equipButton.hidden = false;
                 equipButton.textContent = selection.isEquipped ? 'Equipped' : 'Equip';
-                equipButton.disabled = selection.isEquipped;
+                equipButton.disabled = selection.isEquipped === true;
                 equipButton.onclick = () => {
                     if (!selection.definition.toolId) return;
                     options.onEquipTool?.(selection.definition.toolId);

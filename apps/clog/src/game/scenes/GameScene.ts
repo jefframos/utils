@@ -328,9 +328,9 @@ export class GameScene {
                 style: {
                     fontFamily: 'DamagePopupFont',
                     fontSize: 14,
-                    tint: hit.opened ? 0x93c5fd : 0xf8fafc,
                 },
             });
+            sprite.tint = hit.opened ? 0x93c5fd : 0xf8fafc;
 
             sprite.pivot.set(sprite.width * 0.5, sprite.height);
 

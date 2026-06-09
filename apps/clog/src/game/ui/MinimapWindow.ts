@@ -6,6 +6,7 @@ import { createFloatingWindow } from './FloatingWindow';
 import { createContextMenuTemplate } from './ContextMenuTemplate';
 import { createWindowControlRail } from './WindowControlRail';
 import { WorldModel } from '../world/WorldModel';
+import { createMinimapRenderer } from './minimap/MinimapRenderer';
 
 type MinimapWindowOptions = {
     world: WorldModel;
@@ -14,9 +15,10 @@ type MinimapWindowOptions = {
     onNavigate: (tileX: number, tileY: number) => void;
 };
 
-type MinimapWindow = {
+export type MinimapWindow = {
     refresh: () => void;
     getToggleButton: () => HTMLButtonElement;
+    getCanvasElement: () => HTMLCanvasElement;
     destroy: () => void;
 };
 
@@ -65,6 +67,9 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
 
     const canvas = document.createElement('canvas');
     canvas.className = 'minimap-canvas';
+    const minimapRenderer = createMinimapRenderer(canvas);
+    let renderWidth = 1;
+    let renderHeight = 1;
 
     const body = document.createElement('div');
     body.className = 'minimap-body';
@@ -260,7 +265,7 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
         const zoomLevel = Math.max(0, Math.min(zoomSteps.length - 1, meta.zoomLevel));
         const zoom = zoomSteps[zoomLevel];
 
-        const aspect = canvas.height > 0 ? canvas.width / canvas.height : 1;
+        const aspect = renderHeight > 0 ? renderWidth / renderHeight : 1;
         const viewHeightTiles = BASE_VIEW_HEIGHT_TILES / zoom;
         const viewWidthTiles = viewHeightTiles * aspect;
 
@@ -269,7 +274,7 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
         const endX = startX + viewWidthTiles;
         const endY = startY + viewHeightTiles;
 
-        const pixelPerTile = canvas.height / viewHeightTiles;
+        const pixelPerTile = renderHeight / viewHeightTiles;
 
         return { pixelPerTile, startX, startY, endX, endY, zoomLevel, zoom, viewWidthTiles, viewHeightTiles };
     };
@@ -282,23 +287,17 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
         const targetWidth = Math.max(1, Math.floor(rect.width * dpr));
         const targetHeight = Math.max(1, Math.floor(rect.height * dpr));
+        renderWidth = targetWidth;
+        renderHeight = targetHeight;
 
-        if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+        if (!minimapRenderer.usesWorker && (canvas.width !== targetWidth || canvas.height !== targetHeight)) {
             canvas.width = targetWidth;
             canvas.height = targetHeight;
         }
 
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.imageSmoothingEnabled = false;
-
         const viewport = getViewportRect();
         const { pixelPerTile, startX, startY, endX, endY } = getMapTransform(viewport);
-
-        ctx.fillStyle = '#02040a';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        const tiles: Array<{ x: number; y: number; w: number; h: number; color: string }> = [];
 
         const minTileX = Math.max(0, Math.floor(startX));
         const maxTileX = Math.min(world.width - 1, Math.ceil(endX) - 1);
@@ -324,39 +323,55 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
                     }
                 }
 
-                ctx.fillStyle = color;
                 const px = (x - startX) * pixelPerTile;
                 const py = (y - startY) * pixelPerTile;
-                ctx.fillRect(px, py, pixelPerTile + 0.5, pixelPerTile + 0.5);
+                tiles.push({
+                    x: px,
+                    y: py,
+                    w: pixelPerTile + 0.5,
+                    h: pixelPerTile + 0.5,
+                    color,
+                });
             }
         }
 
         const baseX = (world.baseX + 0.5 - startX) * pixelPerTile;
         const baseY = (world.baseY + 0.5 - startY) * pixelPerTile;
         const baseRadius = Math.max(2, pixelPerTile);
-        ctx.fillStyle = '#93c5fd';
-        ctx.fillRect(baseX - baseRadius, baseY - baseRadius, baseRadius * 2, baseRadius * 2);
-
-        for (const marker of markers) {
-            const markerX = (marker.x + 0.5 - startX) * pixelPerTile;
-            const markerY = (marker.y + 0.5 - startY) * pixelPerTile;
-            const markerRadius = Math.max(4, pixelPerTile * 0.45);
-            ctx.beginPath();
-            ctx.arc(markerX, markerY, markerRadius, 0, Math.PI * 2);
-            ctx.fillStyle = getMarkerColor(marker.colorKey);
-            ctx.fill();
-            ctx.lineWidth = marker.id === selectedMarkerId ? Math.max(2, dpr) : Math.max(1, dpr * 0.8);
-            ctx.strokeStyle = '#f8fafc';
-            ctx.stroke();
-        }
+        const renderMarkers = markers.map((marker) => ({
+            x: (marker.x + 0.5 - startX) * pixelPerTile,
+            y: (marker.y + 0.5 - startY) * pixelPerTile,
+            radius: Math.max(4, pixelPerTile * 0.45),
+            color: getMarkerColor(marker.colorKey),
+            selected: marker.id === selectedMarkerId,
+        }));
 
         const vx = (viewport.left - startX) * pixelPerTile;
         const vy = (viewport.top - startY) * pixelPerTile;
         const vw = Math.max(2, (viewport.right - viewport.left) * pixelPerTile);
         const vh = Math.max(2, (viewport.bottom - viewport.top) * pixelPerTile);
-        ctx.strokeStyle = '#f8fafc';
-        ctx.lineWidth = Math.max(1, dpr);
-        ctx.strokeRect(vx, vy, vw, vh);
+
+        minimapRenderer.render({
+            width: renderWidth,
+            height: renderHeight,
+            backgroundColor: '#02040a',
+            tiles,
+            base: {
+                x: baseX,
+                y: baseY,
+                radius: baseRadius,
+                color: '#93c5fd',
+            },
+            markers: renderMarkers,
+            viewport: {
+                x: vx,
+                y: vy,
+                w: vw,
+                h: vh,
+            },
+            lineColor: '#f8fafc',
+            lineWidth: Math.max(1, dpr),
+        });
 
         rebuildMarkerStrip();
     };
@@ -577,6 +592,7 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
     return {
         refresh: render,
         getToggleButton: () => toggleButton,
+        getCanvasElement: () => canvas,
         destroy: () => {
             canvas.removeEventListener('mousedown', onCanvasMouseDown);
             canvas.removeEventListener('auxclick', onCanvasAuxClick);
@@ -586,6 +602,7 @@ export function createMinimapWindow(options: MinimapWindowOptions): MinimapWindo
             resizeObserver.disconnect();
             unsubscribeMeta();
             contextMenu.destroy();
+            minimapRenderer.destroy();
             frame.destroy();
             toggleButton.remove();
         },

@@ -69,18 +69,20 @@ export class WorldRenderer {
                     graphic.rect(px + 5, py + 5, 3, 3).fill(biome.glow);
                 }
 
-                const mask = this.world.edgeMask8(x, y);
-                const thickness = 2;
-                if (!mask.n) graphic.rect(px, py, TILE_SIZE, thickness).fill(biome.edge);
-                if (!mask.e) graphic.rect(px + TILE_SIZE - thickness, py, thickness, TILE_SIZE).fill(biome.edge);
-                if (!mask.s) graphic.rect(px, py + TILE_SIZE - thickness, TILE_SIZE, thickness).fill(biome.edge);
-                if (!mask.w) graphic.rect(px, py, thickness, TILE_SIZE).fill(biome.edge);
+                if (this.world.isMineableFrontierSolid(x, y)) {
+                    const mask = this.world.edgeMaskSolid8(x, y);
+                    const thickness = 2;
+                    if (!mask.n) graphic.rect(px, py, TILE_SIZE, thickness).fill(biome.edge);
+                    if (!mask.e) graphic.rect(px + TILE_SIZE - thickness, py, thickness, TILE_SIZE).fill(biome.edge);
+                    if (!mask.s) graphic.rect(px, py + TILE_SIZE - thickness, TILE_SIZE, thickness).fill(biome.edge);
+                    if (!mask.w) graphic.rect(px, py, thickness, TILE_SIZE).fill(biome.edge);
 
-                const c = 4;
-                if (mask.n && mask.e && !mask.ne) graphic.poly([px + TILE_SIZE, py, px + TILE_SIZE, py + c, px + TILE_SIZE - c, py]).fill(biome.edge);
-                if (mask.s && mask.e && !mask.se) graphic.poly([px + TILE_SIZE, py + TILE_SIZE, px + TILE_SIZE - c, py + TILE_SIZE, px + TILE_SIZE, py + TILE_SIZE - c]).fill(biome.edge);
-                if (mask.s && mask.w && !mask.sw) graphic.poly([px, py + TILE_SIZE, px, py + TILE_SIZE - c, px + c, py + TILE_SIZE]).fill(biome.edge);
-                if (mask.n && mask.w && !mask.nw) graphic.poly([px, py, px + c, py, px, py + c]).fill(biome.edge);
+                    const c = 4;
+                    if (mask.n && mask.e && !mask.ne) graphic.poly([px + TILE_SIZE, py, px + TILE_SIZE, py + c, px + TILE_SIZE - c, py]).fill(biome.edge);
+                    if (mask.s && mask.e && !mask.se) graphic.poly([px + TILE_SIZE, py + TILE_SIZE, px + TILE_SIZE - c, py + TILE_SIZE, px + TILE_SIZE, py + TILE_SIZE - c]).fill(biome.edge);
+                    if (mask.s && mask.w && !mask.sw) graphic.poly([px, py + TILE_SIZE, px, py + TILE_SIZE - c, px + c, py + TILE_SIZE]).fill(biome.edge);
+                    if (mask.n && mask.w && !mask.nw) graphic.poly([px, py, px + c, py, px, py + c]).fill(biome.edge);
+                }
             }
         }
     }
