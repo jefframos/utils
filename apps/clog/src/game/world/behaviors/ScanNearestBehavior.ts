@@ -40,10 +40,12 @@ export class ScanNearestBehavior {
             areaRadius: number;
             reseedScanRadius: number;
             minDenseNeighbors: number;
+            maxStepFromLastMined: number;
         } = {
                 areaRadius: 9,
                 reseedScanRadius: 18,
                 minDenseNeighbors: 2,
+                maxStepFromLastMined: 3,
             },
     ) { }
 
@@ -51,7 +53,15 @@ export class ScanNearestBehavior {
         const workerX = Math.round(context.workerX);
         const workerY = Math.round(context.workerY);
 
-        const localPlan = this.findBestPlanForAnchor(context, context.anchorX, context.anchorY, workerX, workerY, this.config.areaRadius);
+        const localPlan = this.findBestPlanForAnchor(
+            context,
+            context.anchorX,
+            context.anchorY,
+            workerX,
+            workerY,
+            this.config.areaRadius,
+            true,
+        );
         if (localPlan) {
             return {
                 ...localPlan,
@@ -60,10 +70,37 @@ export class ScanNearestBehavior {
             };
         }
 
+        // If strict local chaining can't find a tile, still exhaust the current
+        // anchor radius before reseeding to a different anchor.
+        const anchorExhaustPlan = this.findBestPlanForAnchor(
+            context,
+            context.anchorX,
+            context.anchorY,
+            workerX,
+            workerY,
+            this.config.areaRadius,
+            false,
+        );
+        if (anchorExhaustPlan) {
+            return {
+                ...anchorExhaustPlan,
+                anchorX: Math.round(context.anchorX),
+                anchorY: Math.round(context.anchorY),
+            };
+        }
+
         const nextAnchor = this.findNextAnchor(context);
         if (!nextAnchor) return null;
 
-        const nextPlan = this.findBestPlanForAnchor(context, nextAnchor.x, nextAnchor.y, workerX, workerY, this.config.areaRadius);
+        const nextPlan = this.findBestPlanForAnchor(
+            context,
+            nextAnchor.x,
+            nextAnchor.y,
+            workerX,
+            workerY,
+            this.config.areaRadius,
+            false,
+        );
         if (!nextPlan) return null;
 
         return {
@@ -76,6 +113,8 @@ export class ScanNearestBehavior {
     private findNextAnchor(context: ScanNearestContext): GridPoint | null {
         const originX = Math.round(context.lastMinedX);
         const originY = Math.round(context.lastMinedY);
+        const workerX = Math.round(context.workerX);
+        const workerY = Math.round(context.workerY);
         const maxRadius = Math.max(1, this.config.reseedScanRadius);
 
         let best: { x: number; y: number; score: number } | null = null;
@@ -90,8 +129,9 @@ export class ScanNearestBehavior {
 
                 const neighbors = context.countSolidNeighbors(x, y);
                 const distToBase = Math.abs(x - Math.round(context.baseX)) + Math.abs(y - Math.round(context.baseY));
+                const distToWorker = Math.abs(x - workerX) + Math.abs(y - workerY);
                 const sparsePenalty = neighbors <= 1 ? 120 : 0;
-                const score = distToBase + distToOrigin * 0.6 + sparsePenalty - neighbors * 2;
+                const score = distToWorker * 1.4 + distToOrigin * 0.6 + distToBase * 0.25 + sparsePenalty - neighbors * 2;
 
                 if (!best || score < best.score) {
                     best = { x, y, score };
@@ -109,6 +149,7 @@ export class ScanNearestBehavior {
         workerX: number,
         workerY: number,
         areaRadius: number,
+        enforceChainRadius: boolean,
     ): Omit<ScanNearestPlan, 'anchorX' | 'anchorY'> | null {
         const startX = Math.round(anchorX);
         const startY = Math.round(anchorY);
@@ -134,14 +175,22 @@ export class ScanNearestBehavior {
                     const distToAnchor = Math.abs(nx - startX) + Math.abs(ny - startY);
                     if (distToAnchor > areaRadius) continue;
 
+                    const lastX = Math.round(context.lastMinedX);
+                    const lastY = Math.round(context.lastMinedY);
+                    const distToLastMined = Math.abs(nx - lastX) + Math.abs(ny - lastY);
+                    if (enforceChainRadius && distToLastMined > Math.max(1, this.config.maxStepFromLastMined)) continue;
+
                     const path = context.buildPath(workerX, workerY, current.x, current.y);
                     if (!path) continue;
 
                     const neighbors = context.countSolidNeighbors(nx, ny);
                     const distToBase = Math.abs(nx - Math.round(context.baseX)) + Math.abs(ny - Math.round(context.baseY));
+                    const distToWorker = Math.abs(nx - workerX) + Math.abs(ny - workerY);
                     const approachOffset = Math.abs(current.x - startX) + Math.abs(current.y - startY);
                     const sparsePenalty = neighbors <= 1 ? 300 : neighbors === 2 ? 35 : 0;
-                    const score = distToAnchor * 1.4 + distToBase * 0.85 + approachOffset * 0.35 + sparsePenalty;
+                    const score = enforceChainRadius
+                        ? distToLastMined * 8 + distToAnchor * 1.2 + approachOffset * 0.25 + distToBase * 0.3 + sparsePenalty
+                        : distToAnchor * 4.5 + distToWorker * 1.6 + approachOffset * 0.25 + distToBase * 0.35 + sparsePenalty;
 
                     const candidate: Candidate = {
                         targetX: nx,

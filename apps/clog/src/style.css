@@ -748,6 +748,16 @@ canvas {
   box-shadow: inset 0 0 0 2px rgba(239, 68, 68, 0.8);
 }
 
+.inventory-cell.is-disabled {
+  background: #a3a3a3;
+  opacity: 0.55;
+  box-shadow: inset 0 0 0 1px rgba(60, 60, 60, 0.35);
+}
+
+.inventory-cell.is-disabled:hover {
+  background: #a3a3a3;
+}
+
 .inventory-item-cell-icon {
   position: absolute;
   left: 2px;
@@ -1086,6 +1096,22 @@ canvas {
   gap: 6px;
 }
 
+.entity-inventory-section {
+  border-top: 2px solid #404040;
+  border-left: 2px solid #404040;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+  background: #d7d7d7;
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.entity-inventory-grid {
+  justify-content: start;
+  margin: 0;
+}
+
 .entity-workers-section {
   border-top: 2px solid #404040;
   border-left: 2px solid #404040;
@@ -1098,7 +1124,8 @@ canvas {
 }
 
 .entity-workers-section[hidden],
-.entity-worker-commands[hidden] {
+.entity-worker-commands[hidden],
+.entity-inventory-section[hidden] {
   display: none !important;
 }
 

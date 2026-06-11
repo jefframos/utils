@@ -15,6 +15,7 @@ import {
 } from './noise';
 import { ScanNearestBehavior, type ScanNearestPlan } from './behaviors/ScanNearestBehavior';
 import type { WorldViewportRect } from '../camera/GameCamera';
+import { getDropDefinitionIdForBiome } from '../bootstrap/storage';
 
 export type SavedTile = {
     x: number;
@@ -193,6 +194,7 @@ const PLAYER_BUILD_RADIUS = 12;
 const WORKER_VISIBILITY_RADIUS = 8;
 const BEACON_VISIBILITY_RADIUS = 10;
 const BEACON_BIOME_PENETRATION_DEPTH = 1;
+const ORE_UNITS_PER_SLOT = 99;
 
 type BeaconNode = SavedBeacon;
 
@@ -215,6 +217,7 @@ export class WorldModel {
         areaRadius: 9,
         reseedScanRadius: 18,
         minDenseNeighbors: 2,
+        maxStepFromLastMined: 3,
     });
     private readonly rules: WorldRules;
     private transientMineState: { x: number; y: number; time: number } | null = null;
@@ -771,6 +774,44 @@ export class WorldModel {
         return this.enqueueWorkerCommand(workerId, { type: 'move', x, y }, 'append');
     }
 
+    canEntityMoveTo(entityId: string, x: number, y: number): boolean {
+        const entity = this.entities.get(entityId);
+        if (!entity) return false;
+
+        this.ensureWorldContainsTile(x, y);
+        const tile = this.getTile(x, y);
+        if (!tile || tile.solid || tile.visibility === 'Unknown') {
+            return false;
+        }
+        if (this.isEntityOccupied(x, y, entity.id)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    canEntityMineTile(entityId: string, x: number, y: number): boolean {
+        const entity = this.entities.get(entityId);
+        if (!entity || !entity.miningDef) return false;
+
+        return this.isMineableFrontierSolid(x, y);
+    }
+
+    mineMainPlayerAt(x: number, y: number, toolId: string): { ok: true; hits: TileDamageHit[] } | { ok: false; reason: string } {
+        const player = this.getMainPlayerEntity();
+        if (!player) {
+            return { ok: false, reason: 'player_not_found' };
+        }
+
+        const tool = getToolDefinition(toolId);
+        if (!tool) {
+            return { ok: false, reason: 'tool_not_found' };
+        }
+
+        const hits = this.mineWithTool(x, y, tool.tileDamage, tool.damageMode ?? 'precise', tool.bluntRadius);
+        return { ok: true, hits };
+    }
+
     moveMainPlayerTo(x: number, y: number): PlayerActionResult {
         const player = this.getMainPlayerEntity();
         if (!player) {
@@ -1235,8 +1276,29 @@ export class WorldModel {
                         } else if (entity.mining.cooldownMs > 0) {
                             entity.mining.cooldownMs = Math.max(0, entity.mining.cooldownMs - deltaMs);
                         } else {
-                            const damage = Math.max(1, Math.floor(tool.tileDamage * Math.max(1, entity.minePower ?? 1)));
-                            const hit = this.mineSingleAt(entity.mining.targetX, entity.mining.targetY, damage);
+                            // Calculate available capacity for proportional damage.
+                            // Treat inventory slots as ore stacks (99 each) and respect larger explicit carry limits.
+                            const inventorySlots = Math.max(1, entity.inventoryDef?.capacity ?? 1);
+                            const configuredCarryLimit = Math.max(1, entity.miningDef?.carryCapacity ?? entity.carryCapacity ?? ORE_UNITS_PER_SLOT);
+                            const totalCapacity = Math.max(configuredCarryLimit, inventorySlots * ORE_UNITS_PER_SLOT);
+                            const carried = entity.mining.carriedOre ?? 0;
+                            const availableCapacity = Math.max(0, totalCapacity - carried);
+
+                            let baseDamage = Math.max(1, Math.floor(tool.tileDamage * Math.max(1, entity.minePower ?? 1)));
+
+                            // Cap damage proportionally if near capacity
+                            if (availableCapacity < baseDamage * 2) {
+                                // When low on capacity, reduce damage to not overshoot capacity
+                                const tile = this.getTile(entity.mining.targetX, entity.mining.targetY);
+                                if (tile) {
+                                    const biomeDef = BIOME_DEFINITIONS[tile.biome];
+                                    const avgOre = (biomeDef.oreYield[0] + biomeDef.oreYield[1]) / 2;
+                                    const orecPerHP = Math.max(1, avgOre / biomeDef.defaultHp);
+                                    baseDamage = Math.ceil(Math.min(baseDamage, availableCapacity / orecPerHP));
+                                }
+                            }
+
+                            const hit = this.mineSingleAt(entity.mining.targetX, entity.mining.targetY, Math.max(1, baseDamage));
                             if (!hit) {
                                 this.releaseMineTarget(entity.mining.targetX, entity.mining.targetY, entity.id);
                                 this.clearWorkerMining(entity);
@@ -1250,12 +1312,15 @@ export class WorldModel {
                                     ? Math.min(workerCadenceMs, toolCadenceMs)
                                     : toolCadenceMs;
                                 entity.mining.miningProgressMs += deltaMs;
-                                if (hit.opened) {
-                                    entity.mining.carriedOre += 1;
-                                    entity.mining.lastMinedX = entity.mining.targetX;
-                                    entity.mining.lastMinedY = entity.mining.targetY;
-                                    this.releaseMineTarget(entity.mining.targetX, entity.mining.targetY, entity.id);
 
+                                const remainingCapacity = Math.max(0, totalCapacity - entity.mining.carriedOre);
+                                const oreGain = Math.max(0, Math.min(hit.oreYield ?? 0, remainingCapacity));
+                                if (oreGain > 0) {
+                                    entity.mining.carriedOre += oreGain;
+                                }
+
+                                const inventoryNowFull = entity.mining.carriedOre >= totalCapacity;
+                                if (inventoryNowFull) {
                                     const home = entity.mining.homeId ? this.entities.get(entity.mining.homeId) : null;
                                     if (home) {
                                         const returnTarget = this.findNearestDropoffTile(home, entity.x, entity.y);
@@ -1269,6 +1334,58 @@ export class WorldModel {
                                                     mode: 'return',
                                                     homeId: home.id,
                                                 };
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (hit.opened) {
+                                    entity.mining.lastMinedX = entity.mining.targetX;
+                                    entity.mining.lastMinedY = entity.mining.targetY;
+                                    this.releaseMineTarget(entity.mining.targetX, entity.mining.targetY, entity.id);
+
+                                    if (!inventoryNowFull) {
+                                        // Continue mining - find next nearby target
+                                        const nextPlan = this.findClosestMineTargetPlan(entity, {
+                                            // Chain mining around the last opened tile so routes stay coherent.
+                                            anchorX: entity.mining.lastMinedX,
+                                            anchorY: entity.mining.lastMinedY,
+                                            lastMinedX: entity.mining.lastMinedX,
+                                            lastMinedY: entity.mining.lastMinedY,
+                                        });
+
+                                        if (nextPlan && this.reserveMineTarget(nextPlan.targetX, nextPlan.targetY, entity.id)) {
+                                            entity.mining.targetX = nextPlan.targetX;
+                                            entity.mining.targetY = nextPlan.targetY;
+                                            entity.mining.approachX = nextPlan.approachX;
+                                            entity.mining.approachY = nextPlan.approachY;
+                                            entity.mining.anchorX = nextPlan.anchorX;
+                                            entity.mining.anchorY = nextPlan.anchorY;
+                                            entity.mining.cooldownMs = 0;
+                                            entity.mining.miningProgressMs = 0;
+                                            entity.movement = {
+                                                path: nextPlan.path,
+                                                stepIndex: 1,
+                                                progress: 0,
+                                                mode: 'move',
+                                            };
+                                        } else {
+                                            // No more targets nearby - return home with collected ore
+                                            const home = entity.mining.homeId ? this.entities.get(entity.mining.homeId) : null;
+                                            if (home && entity.mining.carriedOre > 0) {
+                                                const returnTarget = this.findNearestDropoffTile(home, entity.x, entity.y);
+                                                if (returnTarget) {
+                                                    const path = this.findOpenPath(entity.x, entity.y, returnTarget.x, returnTarget.y, 15000);
+                                                    if (path) {
+                                                        entity.movement = {
+                                                            path,
+                                                            stepIndex: 1,
+                                                            progress: 0,
+                                                            mode: 'return',
+                                                            homeId: home.id,
+                                                        };
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -1685,7 +1802,6 @@ export class WorldModel {
             && component.length >= 42
             && bodyFlavor !== 0
             && (forcedSpecialAsteroid || specialSeed > 0.58);
-
         if (isSpecialAsteroid) {
             const specialBiome = this.pickSpecialAsteroidBiome(anchorX, anchorY, bodyFlavor);
             for (const tile of component) {
@@ -2099,12 +2215,35 @@ export class WorldModel {
             }
         }
 
+        // Calculate ore yield based on damage fraction
+        let oreYield = 0;
+        let oreDefinitionId = 'debug-asteroid-ore';
+        if (opened) {
+            const biomeDef = BIOME_DEFINITIONS[tile.biome];
+            const [yieldMin, yieldMax] = biomeDef.oreYield;
+            const fraction = dealt / biomeDef.defaultHp;
+            const tileOre = yieldMin + Math.floor(Math.random() * (yieldMax - yieldMin + 1));
+            oreYield = Math.max(0, Math.round(fraction * tileOre));
+            oreDefinitionId = getDropDefinitionIdForBiome(tile.biome);
+        }
+
+        // Award ore based on damage fraction for ANY damage dealt
+        if (dealt > 0 && oreYield === 0) {
+            const biomeDef = BIOME_DEFINITIONS[tile.biome];
+            const [yieldMin, yieldMax] = biomeDef.oreYield;
+            const fraction = dealt / biomeDef.defaultHp;
+            const tileOre = yieldMin + Math.floor(Math.random() * (yieldMax - yieldMin + 1));
+            oreYield = Math.max(0, Math.round(fraction * tileOre));
+            oreDefinitionId = getDropDefinitionIdForBiome(tile.biome);
+        }
         return {
             x,
             y,
             damage: dealt,
             remainingHp: tile.hp,
             opened,
+            oreYield,
+            oreDefinitionId,
         };
     }
 

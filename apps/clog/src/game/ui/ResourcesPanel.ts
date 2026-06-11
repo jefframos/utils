@@ -1,8 +1,10 @@
 import type { InventoryState } from '../inventory/InventoryModel';
-import { getAllResources, type ResourceType } from '../inventory/InventoryModel';
+import type { ResourceType } from '../inventory/InventoryModel';
+import { getInventoryItemDefinition } from '../inventory/InventoryModel';
 
 type ResourcesPanelOptions = {
     inventoryState: InventoryState;
+    getInventoryBucket?: (inventoryId: string) => 'storage' | 'held' | 'ignore';
 };
 
 export type ResourcesPanel = {
@@ -39,7 +41,29 @@ export function createResourcesPanel(options: ResourcesPanelOptions): ResourcesP
 
     const update = () => {
         root.innerHTML = '';
-        const resources = getAllResources(options.inventoryState);
+        const resources: Record<ResourceType, { storage: number; held: number }> = {
+            'debug-asteroid-ore': { storage: 0, held: 0 },
+            'debug-ice-shard': { storage: 0, held: 0 },
+            'debug-scrap': { storage: 0, held: 0 },
+            'debug-battery': { storage: 0, held: 0 },
+        };
+
+        for (const item of options.inventoryState.items) {
+            const definition = getInventoryItemDefinition(item.definitionId);
+            if (!definition || definition.itemType !== 'resource') continue;
+            if (!(item.definitionId in resources)) continue;
+
+            const resourceId = item.definitionId as ResourceType;
+            const inventoryId = item.location.inventoryId ?? 'player';
+            const bucket = options.getInventoryBucket?.(inventoryId)
+                ?? (inventoryId === 'player' ? 'held' : 'ignore');
+
+            if (bucket === 'storage') {
+                resources[resourceId].storage += item.quantity;
+            } else if (bucket === 'held') {
+                resources[resourceId].held += item.quantity;
+            }
+        }
 
         const title = document.createElement('div');
         title.style.cssText = `
@@ -53,8 +77,8 @@ export function createResourcesPanel(options: ResourcesPanelOptions): ResourcesP
         title.textContent = 'Resources';
         root.appendChild(title);
 
-        for (const [resourceId, amount] of Object.entries(resources) as Array<[ResourceType, number]>) {
-            if (amount === 0) continue;
+        for (const [resourceId, counts] of Object.entries(resources) as Array<[ResourceType, { storage: number; held: number }]>) {
+            if (counts.storage === 0 && counts.held === 0) continue;
 
             const info = RESOURCE_DISPLAY_INFO[resourceId];
             const row = document.createElement('div');
@@ -70,7 +94,7 @@ export function createResourcesPanel(options: ResourcesPanelOptions): ResourcesP
             label.style.color = info.color;
 
             const value = document.createElement('span');
-            value.textContent = amount.toString();
+            value.textContent = `${counts.storage} (${counts.held})`;
             value.style.fontWeight = 'bold';
             value.style.color = info.color;
 

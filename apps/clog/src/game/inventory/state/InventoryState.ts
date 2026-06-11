@@ -27,10 +27,6 @@ export function createDebugInventoryState(): InventoryState {
         items: [
             createItem('starter-cutter', { inventoryId: PLAYER_INVENTORY_ID, section: 'hotbar', x: 0, y: 0 }, 1, 100),
             createItem('shock-mallet', { inventoryId: PLAYER_INVENTORY_ID, section: 'hotbar', x: 2, y: 0 }, 1, 140),
-            createItem('debug-asteroid-ore', { inventoryId: PLAYER_INVENTORY_ID, section: 'storage', x: 0, y: 0 }, 24, 1),
-            createItem('debug-ice-shard', { inventoryId: PLAYER_INVENTORY_ID, section: 'storage', x: 1, y: 0 }, 18, 1),
-            createItem('debug-scrap', { inventoryId: PLAYER_INVENTORY_ID, section: 'storage', x: 2, y: 0 }, 12, 1),
-            createItem('debug-battery', { inventoryId: PLAYER_INVENTORY_ID, section: 'storage', x: 3, y: 0 }, 8, 1),
         ],
         equippedToolId: 'starter-cutter',
     };

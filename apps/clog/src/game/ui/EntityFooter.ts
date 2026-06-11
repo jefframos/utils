@@ -97,6 +97,23 @@ export function createEntityFooter(options: EntityFooterOptions): EntityFooter {
                     count: 1,
                     paused: false,
                 });
+            } else if (entity.mining) {
+                typeMap.set('current-active-mining', {
+                    id: 'current-active-mining',
+                    type: 'mine',
+                    label: `Mine (${entity.mining.targetX}, ${entity.mining.targetY})`,
+                    count: 1,
+                    paused: false,
+                });
+            } else if (entity.movement && entity.movement.mode === 'move') {
+                const dest = entity.movement.path[entity.movement.path.length - 1];
+                typeMap.set('current-active-move', {
+                    id: 'current-active-move',
+                    type: 'move',
+                    label: `Move (${dest?.x ?? '?'}, ${dest?.y ?? '?'})`,
+                    count: 1,
+                    paused: false,
+                });
             }
 
             for (const cmd of cmdList.queue ?? []) {
@@ -173,6 +190,7 @@ export function createEntityFooter(options: EntityFooterOptions): EntityFooter {
 
     const describePlayerCommand = (type: string, payload: any): string => {
         if (type === 'move') return `Move (${payload.x ?? '?'}, ${payload.y ?? '?'})`;
+        if (type === 'mine') return `Mine (${payload.x ?? '?'}, ${payload.y ?? '?'})`;
         if (type === 'build') return `Build ${payload.buildableType ?? '?'}`;
         return type;
     };

@@ -70,6 +70,13 @@ export type MineWorkerCommand = {
     repeat?: boolean;
 };
 
+export type MinePlayerCommand = {
+    type: 'MinePlayer';
+    x: number;
+    y: number;
+    toolId?: string;
+};
+
 export type InterruptWorkerCommand = {
     type: 'InterruptWorkerCommand';
     workerId: string;
@@ -130,6 +137,7 @@ export type GameCommand =
     | MoveWorkerCommand
     | MovePlayerCommand
     | MineWorkerCommand
+    | MinePlayerCommand
     | InterruptWorkerCommand
     | ClearWorkerCommandsCommand
     | RemoveQueuedWorkerCommand
@@ -158,6 +166,10 @@ export type TileDamageHit = {
     damage: number;
     remainingHp: number;
     opened: boolean;
+    /** Ore actually yielded this hit (proportional to damage fraction of total HP). */
+    oreYield: number;
+    /** Item definition id for the yielded ore. */
+    oreDefinitionId: string;
 };
 
 export type TileDamagedEvent = {
@@ -237,6 +249,12 @@ export type PlayerMovedEvent = {
     y: number;
 };
 
+export type PlayerMiningStartedEvent = {
+    type: 'PlayerMiningStarted';
+    x: number;
+    y: number;
+};
+
 export type WorkerMiningStartedEvent = {
     type: 'WorkerMiningStarted';
     workerId: string;
@@ -293,6 +311,7 @@ export type GameEvent =
     | WorkerMovedEvent
     | PlayerMovedEvent
     | WorkerMiningStartedEvent
+    | PlayerMiningStartedEvent
     | WorkerCommandInterruptedEvent
     | WorkerCommandsClearedEvent
     | WorkerQueuedCommandRemovedEvent

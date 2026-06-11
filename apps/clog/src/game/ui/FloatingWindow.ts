@@ -76,10 +76,27 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
     let startTop = 0;
 
     const clamp = () => {
-        const maxLeft = Math.max(8, window.innerWidth - root.offsetWidth - 8);
-        const maxTop = Math.max(8, window.innerHeight - root.offsetHeight - 8);
-        state.left = Math.max(8, Math.min(maxLeft, state.left));
-        state.top = Math.max(8, Math.min(maxTop, state.top));
+        const viewportPadding = 8;
+        const minSize = 120;
+
+        if (canResize) {
+            const maxWidth = Math.max(minSize, window.innerWidth - viewportPadding * 2);
+            const maxHeight = Math.max(minSize, window.innerHeight - viewportPadding * 2);
+            state.width = Math.max(minSize, Math.min(maxWidth, state.width));
+            state.height = Math.max(minSize, Math.min(maxHeight, state.height));
+        }
+
+        const measuredWidth = canResize
+            ? state.width
+            : Math.max(0, root.getBoundingClientRect().width || root.offsetWidth);
+        const measuredHeight = canResize
+            ? state.height
+            : Math.max(0, root.getBoundingClientRect().height || root.offsetHeight);
+
+        const maxLeft = Math.max(viewportPadding, window.innerWidth - measuredWidth - viewportPadding);
+        const maxTop = Math.max(viewportPadding, window.innerHeight - measuredHeight - viewportPadding);
+        state.left = Math.max(viewportPadding, Math.min(maxLeft, state.left));
+        state.top = Math.max(viewportPadding, Math.min(maxTop, state.top));
     };
 
     const apply = () => {
@@ -174,6 +191,7 @@ export function createFloatingWindow(options: FloatingWindowOptions): FloatingWi
     };
     window.addEventListener('resize', onWindowResize);
 
+    clamp();
     apply();
     bringFloatingWindowToFront(root);
 

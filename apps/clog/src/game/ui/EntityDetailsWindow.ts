@@ -1,6 +1,8 @@
 import type { WorkerEntityCommandList, WorldEntity } from '../world/WorldModel';
 import { createFloatingWindow } from './FloatingWindow';
 import type { EntityDetailsWindowMeta } from '../meta/GameMetaStore';
+import type { InventoryItemDefinition, InventoryItemInstance, InventoryLocation } from '../inventory/ItemDefinitions';
+import { canPlaceAt, getInventoryItemDefinition, moveItemWithRules, type InventoryState } from '../inventory/InventoryModel';
 
 type EntityDetailsWindowOptions = {
     onDeleteBeacon: (entityId: string) => void;
@@ -13,8 +15,19 @@ type EntityDetailsWindowOptions = {
     onRemoveQueuedWorkerCommand: (workerId: string, commandId: string) => void;
     onBuild: (entityId: string) => void;
     getWorkersForBuilding: (buildingId: string) => ReadonlyArray<WorldEntity>;
+    inventoryAdapter?: EntityInventoryAdapter;
     initialWindowState: EntityDetailsWindowMeta;
     onWindowStateChange: (state: EntityDetailsWindowMeta) => void;
+};
+
+export type EntityInventoryAdapter = {
+    getState: () => InventoryState | null;
+    ensureEntityInventory: (entity: WorldEntity, state: InventoryState) => { inventoryId: string; maxSlots: number } | null;
+    syncEntityInventory?: (entity: WorldEntity, state: InventoryState, binding: { inventoryId: string; maxSlots: number }) => boolean;
+    onDidChange?: (listener: () => void) => () => void;
+    onStateChange: (state: InventoryState) => void;
+    onInspectItem: (selection: { item: InventoryItemInstance; definition: InventoryItemDefinition; isEquipped: boolean }) => void;
+    onEquipTool: (toolId: string) => void;
 };
 
 export type EntityDetailsWindow = {
@@ -25,6 +38,24 @@ export type EntityDetailsWindow = {
 };
 
 const BEACON_REFUND_ORE = 5;
+const ENTITY_INVENTORY_COLUMNS = 8;
+const ENTITY_INVENTORY_MIN_VISIBLE_SLOTS = 12;
+const DEFAULT_CELL_SIZE = 42;
+const DEFAULT_CELL_GAP = 5;
+
+type OccupiedCell = {
+    item: InventoryItemInstance;
+    definition: InventoryItemDefinition;
+    relX: number;
+    relY: number;
+    isFirst: boolean;
+    isLast: boolean;
+};
+
+type InventoryMetrics = {
+    cellSize: number;
+    cellGap: number;
+};
 
 export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): EntityDetailsWindow {
     const frame = createFloatingWindow({
@@ -54,6 +85,19 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
 
     const actions = document.createElement('div');
     actions.className = 'entity-details-actions';
+
+    const inventorySection = document.createElement('section');
+    inventorySection.className = 'entity-inventory-section';
+    inventorySection.hidden = true;
+
+    const inventoryTitle = document.createElement('h5');
+    inventoryTitle.className = 'entity-workers-title';
+    inventoryTitle.textContent = 'Inventory';
+
+    const inventoryGrid = document.createElement('div');
+    inventoryGrid.className = 'inventory-grid entity-inventory-grid';
+
+    inventorySection.append(inventoryTitle, inventoryGrid);
 
     const setActions = (entries: Array<{ label: string; onClick: () => void; disabled?: boolean }>) => {
         actions.textContent = '';
@@ -118,8 +162,13 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
 
     baseWorkersSection.append(baseWorkersHeader, workersGrid);
 
-    panel.append(name, summary, meta, actions, baseWorkersSection, workerCommandsSection);
+    panel.append(name, summary, meta, inventorySection, actions, baseWorkersSection, workerCommandsSection);
     frame.content.appendChild(panel);
+
+    let draggingItemId: string | null = null;
+    let draggingAnchorCell: { x: number; y: number } | null = null;
+    let activeDragGhost: HTMLElement | null = null;
+    let currentEntity: WorldEntity | null = null;
 
     const setRows = (rows: Array<[string, string]>) => {
         meta.textContent = '';
@@ -256,8 +305,215 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
         }
     };
 
+    const renderEntityInventory = (entity: WorldEntity) => {
+        inventoryGrid.textContent = '';
+
+        const adapter = options.inventoryAdapter;
+        if (!adapter) {
+            inventorySection.hidden = true;
+            return;
+        }
+
+        const state = adapter.getState();
+        const binding = state ? adapter.ensureEntityInventory(entity, state) : null;
+        if (!state || !binding || binding.maxSlots <= 0) {
+            inventorySection.hidden = true;
+            return;
+        }
+
+        const synced = adapter.syncEntityInventory?.(entity, state, binding) ?? false;
+        if (synced) {
+            adapter.onStateChange(state);
+            return;
+        }
+
+        const visibleSlots = Math.max(ENTITY_INVENTORY_MIN_VISIBLE_SLOTS, binding.maxSlots);
+        const rows = Math.max(1, Math.ceil(visibleSlots / ENTITY_INVENTORY_COLUMNS));
+        inventoryTitle.textContent = `Inventory (${binding.maxSlots} slots)`;
+        inventoryGrid.style.setProperty('--inventory-columns', String(ENTITY_INVENTORY_COLUMNS));
+        inventoryGrid.style.setProperty('--inventory-rows', String(rows));
+
+        const metrics = getInventoryMetrics(frame.root);
+        inventoryGrid.style.setProperty('--inventory-cell-size', `${metrics.cellSize}px`);
+        inventoryGrid.style.setProperty('--inventory-gap', `${metrics.cellGap}px`);
+
+        const occupancy = buildOccupancyMap(state, binding.inventoryId, 'storage');
+
+        const clearDropPreview = () => {
+            inventoryGrid.querySelectorAll('.inventory-cell.is-drop-valid, .inventory-cell.is-drop-invalid').forEach((entry) => {
+                entry.classList.remove('is-drop-valid', 'is-drop-invalid');
+            });
+        };
+
+        const markDropPreview = (item: InventoryItemInstance, definition: InventoryItemDefinition, location: InventoryLocation): boolean => {
+            clearDropPreview();
+            const inCapacity = isLocationWithinCapacity(definition, location, binding.maxSlots, ENTITY_INVENTORY_COLUMNS, rows);
+            const valid = inCapacity && canPlaceAt(state, definition, location, item.id);
+            for (const cell of definition.shape.cells) {
+                const px = location.x + cell.x;
+                const py = location.y + cell.y;
+                const slot = inventoryGrid.querySelector(`.inventory-cell[data-x="${px}"][data-y="${py}"]`) as HTMLElement | null;
+                if (!slot) continue;
+                slot.classList.add(valid ? 'is-drop-valid' : 'is-drop-invalid');
+            }
+            return valid;
+        };
+
+        for (let y = 0; y < rows; y++) {
+            for (let x = 0; x < ENTITY_INVENTORY_COLUMNS; x++) {
+                const key = `${x}:${y}`;
+                const occupied = occupancy.get(key);
+                const cellIndex = y * ENTITY_INVENTORY_COLUMNS + x;
+                const enabled = cellIndex < binding.maxSlots;
+
+                const cell = document.createElement('div');
+                cell.className = 'inventory-cell';
+                cell.dataset.section = 'storage';
+                cell.dataset.x = String(x);
+                cell.dataset.y = String(y);
+
+                if (!enabled) {
+                    cell.classList.add('is-disabled');
+                }
+
+                if (occupied) {
+                    const { item, definition } = occupied;
+                    cell.classList.add('is-occupied');
+                    cell.style.setProperty('--inventory-item-backdrop', definition.view.backdrop);
+                    cell.style.setProperty('--inventory-item-tint', definition.view.tint);
+                    if (definition.toolId === state.equippedToolId) {
+                        cell.classList.add('is-equipped');
+                    }
+
+                    cell.addEventListener('click', () => {
+                        adapter.onInspectItem({ item, definition, isEquipped: definition.toolId === state.equippedToolId });
+                        if (definition.toolId) {
+                            adapter.onEquipTool(definition.toolId);
+                        }
+                    });
+
+                    if (enabled) {
+                        cell.draggable = true;
+                        cell.addEventListener('dragstart', (event) => {
+                            draggingItemId = item.id;
+                            draggingAnchorCell = { x: occupied.relX, y: occupied.relY };
+                            event.dataTransfer?.setData('text/plain', item.id);
+
+                            const ghost = createDragGhostElement(definition, item.quantity, metrics);
+                            document.body.appendChild(ghost);
+                            activeDragGhost = ghost;
+
+                            const dragOffsetX = 4 + occupied.relX * (metrics.cellSize + metrics.cellGap) + Math.round(metrics.cellSize * 0.5);
+                            const dragOffsetY = 4 + occupied.relY * (metrics.cellSize + metrics.cellGap) + Math.round(metrics.cellSize * 0.5);
+                            event.dataTransfer?.setDragImage(ghost, dragOffsetX, dragOffsetY);
+                        });
+
+                        cell.addEventListener('dragend', () => {
+                            draggingItemId = null;
+                            draggingAnchorCell = null;
+                            clearDropPreview();
+                            if (activeDragGhost) {
+                                activeDragGhost.remove();
+                                activeDragGhost = null;
+                            }
+                        });
+                    }
+
+                    if (occupied.isFirst) {
+                        const icon = document.createElement('span');
+                        icon.className = 'inventory-item-cell-icon';
+                        icon.innerHTML = definition.view.iconSvg;
+                        cell.appendChild(icon);
+                    }
+
+                    if (occupied.isLast) {
+                        const amount = document.createElement('span');
+                        amount.className = 'inventory-item-cell-amount';
+                        amount.textContent = definition.itemType === 'tool' ? 'x1' : `x${item.quantity}`;
+                        cell.appendChild(amount);
+                    }
+                }
+
+                inventoryGrid.appendChild(cell);
+            }
+        }
+
+        inventoryGrid.ondragover = (event) => {
+            if (!draggingItemId) return;
+
+            const item = state.items.find((entry) => entry.id === draggingItemId);
+            const definition = item ? getInventoryItemDefinition(item.definitionId) : undefined;
+            if (!item || !definition) return;
+
+            const dropCell = getDropLocation(inventoryGrid, metrics, ENTITY_INVENTORY_COLUMNS, rows, event.clientX, event.clientY);
+            if (!dropCell) {
+                clearDropPreview();
+                return;
+            }
+
+            const location: InventoryLocation = {
+                inventoryId: binding.inventoryId,
+                section: 'storage',
+                x: dropCell.x - (draggingAnchorCell?.x ?? 0),
+                y: dropCell.y - (draggingAnchorCell?.y ?? 0),
+            };
+
+            markDropPreview(item, definition, location);
+            event.preventDefault();
+        };
+
+        inventoryGrid.ondragleave = (event) => {
+            const related = event.relatedTarget as Node | null;
+            if (related && inventoryGrid.contains(related)) return;
+            clearDropPreview();
+        };
+
+        inventoryGrid.ondrop = (event) => {
+            const itemId = event.dataTransfer?.getData('text/plain') || draggingItemId;
+            if (!itemId) return;
+
+            const item = state.items.find((entry) => entry.id === itemId);
+            const definition = item ? getInventoryItemDefinition(item.definitionId) : undefined;
+            if (!item || !definition) return;
+
+            const dropCell = getDropLocation(inventoryGrid, metrics, ENTITY_INVENTORY_COLUMNS, rows, event.clientX, event.clientY);
+            if (!dropCell) return;
+
+            const location: InventoryLocation = {
+                inventoryId: binding.inventoryId,
+                section: 'storage',
+                x: dropCell.x - (draggingAnchorCell?.x ?? 0),
+                y: dropCell.y - (draggingAnchorCell?.y ?? 0),
+            };
+
+            event.preventDefault();
+            if (!isLocationWithinCapacity(definition, location, binding.maxSlots, ENTITY_INVENTORY_COLUMNS, rows)) {
+                clearDropPreview();
+                return;
+            }
+
+            const result = moveItemWithRules(state, itemId, location);
+            if (!result.ok) {
+                clearDropPreview();
+                return;
+            }
+
+            clearDropPreview();
+            adapter.onStateChange(state);
+            renderEntityInventory(entity);
+        };
+
+        inventorySection.hidden = false;
+    };
+
+    const unsubscribeInventory = options.inventoryAdapter?.onDidChange?.(() => {
+        if (!currentEntity) return;
+        renderEntityInventory(currentEntity);
+    });
+
     return {
         openForEntity: (entity) => {
+            currentEntity = entity;
             const entityLabel = entity.kind === 'base'
                 ? 'Space Station'
                 : entity.kind === 'beacon'
@@ -282,6 +538,7 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
                 ['Visibility', `${entity.visibilityRadius} tiles`],
             ]);
             meta.hidden = false;
+            renderEntityInventory(entity);
 
             if (entity.kind === 'beacon') {
                 setActions([
@@ -348,10 +605,13 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
             frame.setMinimized(false);
         },
         clearSelection: () => {
+            currentEntity = null;
             name.textContent = 'No entity selected';
             summary.textContent = 'Click an entity to inspect it.';
             meta.textContent = '';
             meta.hidden = true;
+            inventorySection.hidden = true;
+            inventoryGrid.textContent = '';
             setActions([]);
             baseWorkersSection.hidden = true;
             workersGrid.textContent = '';
@@ -364,7 +624,132 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
             frame.setMinimized(false);
         },
         destroy: () => {
+            unsubscribeInventory?.();
             frame.destroy();
         },
+    };
+}
+
+function buildOccupancyMap(state: InventoryState, inventoryId: string, section: 'storage' | 'hotbar'): Map<string, OccupiedCell> {
+    const map = new Map<string, OccupiedCell>();
+
+    for (const item of state.items) {
+        if ((item.location.inventoryId ?? 'player') !== inventoryId) continue;
+        if (item.location.section !== section) continue;
+
+        const definition = getInventoryItemDefinition(item.definitionId);
+        if (!definition) continue;
+
+        const sortedCells = definition.shape.cells.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
+        const first = sortedCells[0] ?? { x: 0, y: 0 };
+        const last = sortedCells[sortedCells.length - 1] ?? first;
+
+        for (const rel of definition.shape.cells) {
+            const x = item.location.x + rel.x;
+            const y = item.location.y + rel.y;
+            map.set(`${x}:${y}`, {
+                item,
+                definition,
+                relX: rel.x,
+                relY: rel.y,
+                isFirst: rel.x === first.x && rel.y === first.y,
+                isLast: rel.x === last.x && rel.y === last.y,
+            });
+        }
+    }
+
+    return map;
+}
+
+function getDropLocation(
+    grid: HTMLElement,
+    metrics: InventoryMetrics,
+    columns: number,
+    rows: number,
+    clientX: number,
+    clientY: number,
+): { x: number; y: number } | null {
+    const rect = grid.getBoundingClientRect();
+    const totalWidth = columns * metrics.cellSize + (columns - 1) * metrics.cellGap;
+    const totalHeight = rows * metrics.cellSize + (rows - 1) * metrics.cellGap;
+    const localX = clientX - rect.left;
+    const localY = clientY - rect.top;
+    if (localX < 0 || localY < 0 || localX > totalWidth || localY > totalHeight) {
+        return null;
+    }
+
+    const x = Math.min(columns - 1, Math.max(0, Math.floor(localX / (metrics.cellSize + metrics.cellGap))));
+    const y = Math.min(rows - 1, Math.max(0, Math.floor(localY / (metrics.cellSize + metrics.cellGap))));
+    return { x, y };
+}
+
+function isLocationWithinCapacity(
+    definition: InventoryItemDefinition,
+    location: InventoryLocation,
+    capacity: number,
+    columns: number,
+    rows: number,
+): boolean {
+    for (const cell of definition.shape.cells) {
+        const x = location.x + cell.x;
+        const y = location.y + cell.y;
+        if (x < 0 || y < 0 || x >= columns || y >= rows) return false;
+        if ((y * columns + x) >= capacity) return false;
+    }
+    return true;
+}
+
+function createDragGhostElement(definition: InventoryItemDefinition, quantity: number, metrics: InventoryMetrics): HTMLElement {
+    const ghost = document.createElement('div');
+    ghost.className = 'inventory-drag-ghost';
+    const width = definition.shape.width * metrics.cellSize + (definition.shape.width - 1) * metrics.cellGap;
+    const height = definition.shape.height * metrics.cellSize + (definition.shape.height - 1) * metrics.cellGap;
+    ghost.style.width = `${width}px`;
+    ghost.style.height = `${height}px`;
+
+    const shapeLayer = document.createElement('div');
+    shapeLayer.className = 'inventory-drag-ghost-shape';
+    shapeLayer.style.setProperty('--inventory-gap', `${metrics.cellGap}px`);
+    shapeLayer.style.gridTemplateColumns = `repeat(${definition.shape.width}, 1fr)`;
+    shapeLayer.style.gridTemplateRows = `repeat(${definition.shape.height}, 1fr)`;
+
+    const sorted = definition.shape.cells.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
+    const first = sorted[0] ?? { x: 0, y: 0 };
+    const last = sorted[sorted.length - 1] ?? first;
+
+    for (const cell of definition.shape.cells) {
+        const block = document.createElement('span');
+        block.className = 'inventory-item-shape-cell is-filled';
+        block.style.gridColumn = String(cell.x + 1);
+        block.style.gridRow = String(cell.y + 1);
+
+        if (cell.x === first.x && cell.y === first.y) {
+            const icon = document.createElement('span');
+            icon.className = 'inventory-item-cell-icon';
+            icon.innerHTML = definition.view.iconSvg;
+            block.appendChild(icon);
+        }
+
+        if (cell.x === last.x && cell.y === last.y) {
+            const amount = document.createElement('span');
+            amount.className = 'inventory-item-cell-amount';
+            amount.textContent = definition.itemType === 'tool' ? 'x1' : `x${quantity}`;
+            block.appendChild(amount);
+        }
+
+        shapeLayer.appendChild(block);
+    }
+
+    ghost.appendChild(shapeLayer);
+    return ghost;
+}
+
+function getInventoryMetrics(source: HTMLElement): InventoryMetrics {
+    const styles = getComputedStyle(source);
+    const cellSize = Number.parseInt(styles.getPropertyValue('--inventory-cell-size').trim(), 10);
+    const cellGap = Number.parseInt(styles.getPropertyValue('--inventory-gap').trim(), 10);
+    return {
+        cellSize: Number.isFinite(cellSize) ? cellSize : DEFAULT_CELL_SIZE,
+        cellGap: Number.isFinite(cellGap) ? cellGap : DEFAULT_CELL_GAP,
     };
 }

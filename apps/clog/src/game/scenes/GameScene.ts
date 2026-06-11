@@ -14,7 +14,7 @@ import { ViewportSpace } from '../core/ViewportSpace';
 import { WorldRenderer } from '../render/WorldRenderer';
 import { WorldModel, type WorldEntity } from '../world/WorldModel';
 import { createContextMenuTemplate } from '../ui/ContextMenuTemplate';
-import { createEntityDetailsWindow } from '../ui/EntityDetailsWindow';
+import { createEntityDetailsWindow, type EntityInventoryAdapter } from '../ui/EntityDetailsWindow';
 import { createEntityFooter, type EntityFooter } from '../ui/EntityFooter';
 import { createBuildPanel, type BuildPanel, type BuildPanelMeta } from '../ui/BuildPanel';
 import type { BuildableEntityType } from '../content/buildables';
@@ -70,6 +70,7 @@ export class GameScene {
         private readonly onToolSelected: (toolId: string) => void,
         private readonly getAvailableOre: () => number = () => 0,
         onWorkerOreDelivered: (amount: number) => void = () => { },
+        private readonly inventoryAdapter?: EntityInventoryAdapter,
         initialEntityDetailsWindowState?: EntityDetailsWindowMeta,
         onEntityDetailsWindowStateChange?: (state: EntityDetailsWindowMeta) => void,
         initialBuildPanelState?: BuildPanelMeta,
@@ -118,6 +119,7 @@ export class GameScene {
             getWorkersForBuilding: (buildingId) => {
                 return this.world.getWorkersForBuilding(buildingId);
             },
+            inventoryAdapter: this.inventoryAdapter,
             initialWindowState: initialEntityDetailsWindowState ?? {
                 open: false,
                 minimized: false,
@@ -303,7 +305,7 @@ export class GameScene {
                 this.refreshSelectedEntityDetails();
             } else if (event.type === 'PlayerCommandInterrupted' || event.type === 'PlayerCommandsCleared' || event.type === 'PlayerQueuedCommandRemoved' || event.type === 'PlayerCommandsPaused' || event.type === 'PlayerCommandsResumed') {
                 this.refreshSelectedEntityDetails();
-            } else if (event.type === 'PlayerMoved') {
+            } else if (event.type === 'PlayerMoved' || event.type === 'PlayerMiningStarted') {
                 this.refreshSelectedEntityDetails();
             } else if (event.type === 'WorldGenerated') {
                 this.clearEntitySelection();
@@ -572,124 +574,89 @@ export class GameScene {
         const tileY = Math.floor(worldPos.y / TILE_SIZE);
 
         const tile = this.world.getTile(tileX, tileY);
-        const hasEnoughOre = this.getAvailableOre() >= 10;
-        const entity = this.world.getEntityAtTile(tileX, tileY);
+        const clickedEntity = this.world.getEntityAtTile(tileX, tileY);
         const selectedEntity = this.selectedEntityId ? this.world.getEntityById(this.selectedEntityId) : null;
 
-        if (selectedEntity?.kind === 'worker') {
-            const mineableFrontier = !!tile && tile.solid && this.world.canWorkerMineTile(selectedEntity.id, tileX, tileY);
-            const canMoveHere = !!tile && selectedEntity.deployed && !tile.solid && tile.visibility !== 'Unknown' && (!(entity && entity.id !== selectedEntity.id));
-
-            const items = [] as Array<{
-                id: string;
-                label: string;
-                disabled?: boolean;
-                disabledReason?: string;
-                onSelect?: () => void;
-            }>;
-
-            if (canMoveHere) {
-                items.push({
-                    id: 'worker-move-here',
-                    label: 'Queue Move Here',
-                    onSelect: () => {
-                        this.transport.send({ type: 'MoveWorker', workerId: selectedEntity.id, x: tileX, y: tileY });
-                    },
-                });
-            }
-
-            if (mineableFrontier) {
-                items.push({
-                    id: 'worker-mine-here',
-                    label: 'Queue Mine Here',
-                    onSelect: () => {
-                        this.transport.send({ type: 'MineWorker', workerId: selectedEntity.id, x: tileX, y: tileY });
-                    },
-                });
-            }
-
-            items.push(
-                {
-                    id: 'worker-interrupt-command',
-                    label: 'Interrupt Current Command',
-                    onSelect: () => {
-                        this.transport.send({ type: 'InterruptWorkerCommand', workerId: selectedEntity.id });
-                    },
-                },
-                {
-                    id: 'worker-clear-commands',
-                    label: 'Clear Command Queue',
-                    onSelect: () => {
-                        this.transport.send({ type: 'ClearWorkerCommands', workerId: selectedEntity.id });
-                    },
-                },
-            );
-
-            if (items.length > 0) {
-                this.worldContextMenu.open({
-                    x: event.clientX,
-                    y: event.clientY,
-                    items,
-                });
-                return;
-            }
-        }
-
-        if (entity?.kind === 'worker' && entity.deployed) {
-            this.worldContextMenu.open({
-                x: event.clientX,
-                y: event.clientY,
-                items: [
-                    {
-                        id: 'worker-return-to-base',
-                        label: 'Return Worker To Base',
-                        onSelect: () => {
-                            this.transport.send({ type: 'RecallWorker', workerId: entity.id });
-                        },
-                    },
-                ],
-            });
-            return;
-        }
-
-        const items: Array<{
+        type MenuItem = {
             id: string;
             label: string;
             disabled?: boolean;
             disabledReason?: string;
-            submenuDirection?: 'right' | 'up';
             onSelect?: () => void;
-            children?: Array<{
-                id: string;
-                label: string;
-                disabled?: boolean;
-                disabledReason?: string;
-                onSelect?: () => void;
-            }>;
-        }> = [];
+        };
 
-        if (selectedEntity?.kind === 'player') {
-            items.push({
-                id: 'player-actions-menu',
-                label: 'Player Actions',
-                submenuDirection: 'up',
-                children: [
-                    {
-                        id: 'player-walk-here',
-                        label: 'Walk Here',
-                        disabled: !tile || tile.solid || tile.visibility === 'Unknown',
-                        disabledReason: !tile
-                            ? 'Out of world bounds'
-                            : tile.solid
-                                ? 'Target tile is blocked'
-                                : tile.visibility === 'Unknown'
-                                    ? 'Target tile is unexplored'
-                                    : undefined,
-                        onSelect: () => {
+        const items: MenuItem[] = [];
+
+        // ---------- behaviour-driven items for the selected entity ----------
+        if (selectedEntity) {
+            const isDeployed = selectedEntity.deployed !== false || selectedEntity.kind === 'player';
+
+            // Walk / Move action — any entity with a walking component
+            if (selectedEntity.walking) {
+                const isSelf = clickedEntity?.id === selectedEntity.id;
+                const canMove = isDeployed && this.world.canEntityMoveTo(selectedEntity.id, tileX, tileY);
+                const walkDisabledReason = !tile
+                    ? 'Out of world bounds'
+                    : tile.solid
+                        ? 'Tile is blocked'
+                        : tile.visibility === 'Unknown'
+                            ? 'Tile is unexplored'
+                            : !isDeployed
+                                ? 'Unit is not deployed'
+                                : clickedEntity && !isSelf
+                                    ? 'Tile is occupied'
+                                    : undefined;
+
+                items.push({
+                    id: 'action-walk-here',
+                    label: 'Walk Here',
+                    disabled: !canMove,
+                    disabledReason: walkDisabledReason,
+                    onSelect: canMove ? () => {
+                        if (selectedEntity.kind === 'worker') {
+                            this.transport.send({ type: 'MoveWorker', workerId: selectedEntity.id, x: tileX, y: tileY });
+                        } else if (selectedEntity.kind === 'player') {
                             this.transport.send({ type: 'MovePlayer', x: tileX, y: tileY });
-                        },
-                    },
-                ],
+                        }
+                    } : undefined,
+                });
+            }
+
+            // Mine action — any entity with a miningDef component
+            if (selectedEntity.miningDef && isDeployed) {
+                const canMine = this.world.canEntityMineTile(selectedEntity.id, tileX, tileY);
+                const mineDisabledReason = !tile
+                    ? 'Out of world bounds'
+                    : !tile.solid
+                        ? 'No ore here — target a solid tile'
+                        : tile.visibility === 'Unknown'
+                            ? 'Tile is unexplored'
+                            : undefined;
+
+                items.push({
+                    id: 'action-mine-here',
+                    label: 'Mine Here',
+                    disabled: !canMine,
+                    disabledReason: mineDisabledReason,
+                    onSelect: canMine ? () => {
+                        if (selectedEntity.kind === 'worker') {
+                            this.transport.send({ type: 'MineWorker', workerId: selectedEntity.id, x: tileX, y: tileY });
+                        } else if (selectedEntity.kind === 'player') {
+                            this.transport.send({ type: 'MinePlayer', x: tileX, y: tileY, toolId: this.getPrimaryTool().id });
+                        }
+                    } : undefined,
+                });
+            }
+        }
+
+        // ---------- right-clicked on a deployed worker (not already selected) ----------
+        if (clickedEntity?.kind === 'worker' && clickedEntity.deployed && clickedEntity.id !== selectedEntity?.id) {
+            items.push({
+                id: 'worker-return-to-base',
+                label: 'Return Worker To Base',
+                onSelect: () => {
+                    this.transport.send({ type: 'RecallWorker', workerId: clickedEntity.id });
+                },
             });
         }
 
@@ -754,6 +721,13 @@ export class GameScene {
             if (deliveries.length > 0) {
                 const totalOre = deliveries.reduce((sum, delivery) => sum + delivery.amount, 0);
                 this.onWorkerOreDelivered(totalOre);
+            }
+            // Refresh selected entity details if entity is mining or moving
+            if (this.selectedEntityId) {
+                const selectedEntity = this.world.getEntityById(this.selectedEntityId);
+                if (selectedEntity && (selectedEntity.mining || selectedEntity.movement)) {
+                    this.refreshSelectedEntityDetails();
+                }
             }
             this.fixedUpdateAccumulatorMs -= GameScene.FIXED_STEP_MS;
             steps++;

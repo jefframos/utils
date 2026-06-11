@@ -16,4 +16,6 @@ export type BiomeDefinition = {
     glow: number;
     revealRadius: number;
     defaultHp: number;
+    /** Min/max ore a fully-destroyed tile yields (uniform distribution). */
+    oreYield: [number, number];
 };

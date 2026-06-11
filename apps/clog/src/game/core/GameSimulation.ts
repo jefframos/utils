@@ -69,6 +69,26 @@ export class GameSimulation {
             ];
         }
 
+        if (command.type === 'MinePlayer') {
+            const toolId = command.toolId ?? this.mainPlayerTools.getActiveTool().id;
+            const result = this.world.mineMainPlayerAt(command.x, command.y, toolId);
+            if (!result.ok) return [];
+
+            const events: GameEvent[] = [];
+            if (result.hits.length > 0) {
+                events.push({ type: 'TileDamaged', hits: result.hits });
+            }
+
+            if (result.hits.some((hit) => hit.opened)) {
+                events.push({ type: 'TileMined', x: command.x, y: command.y });
+            } else if (result.hits.length > 0) {
+                events.push({ type: 'TileMined', x: command.x, y: command.y });
+            }
+
+            events.push({ type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() });
+            return events;
+        }
+
         if (command.type === 'GenerateWorld') {
             this.world.reset(command.seed);
             return [

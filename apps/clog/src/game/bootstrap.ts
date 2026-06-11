@@ -14,10 +14,9 @@ import { createToolInspectorPanel } from './ui/ToolInspectorPanel';
 import { createWindowControlRail } from './ui/WindowControlRail';
 import { createDebugGraphWindow } from './ui/DebugGraphWindow';
 import { ViewportSpace } from './core/ViewportSpace';
-import { getInventoryItemDefinition, getTotalResourceCount } from './inventory/InventoryModel';
+import { getInventoryItemDefinition, getTotalResourceCount, type InventoryState } from './inventory/InventoryModel';
 import {
     createWorldAutosave,
-    getDropDefinitionIdForBiome,
     loadInventoryState,
     loadMetaFromCookie,
     loadSnapshot, normalizeEntityDetailsMeta,
@@ -37,6 +36,8 @@ import { ModuleHost } from './modules/ModuleHost';
 import { createCanvasSurfaceModule } from './modules/builtin/CanvasSurfaceModule';
 import { createMinimapUiModule } from './modules/builtin/MinimapUiModule';
 import { getBiomeGenerationNodeGraphMermaid } from './world/noise';
+import type { EntityInventoryAdapter } from './ui/EntityDetailsWindow';
+import type { WorldEntity } from './world/WorldModel';
 
 export async function bootstrapGame(): Promise<void> {
     const app = new Application();
@@ -92,8 +93,154 @@ export async function bootstrapGame(): Promise<void> {
         },
     });
 
+    const ENTITY_INVENTORY_COLUMNS = 8;
+    const ENTITY_INVENTORY_DEFAULT_VISIBLE = 12;
+    const inventoryChangeListeners = new Set<() => void>();
+
+    const notifyInventoryChanged = () => {
+        for (const listener of inventoryChangeListeners) {
+            listener();
+        }
+    };
+
+    const sanitizeInventoryItemLocations = (state: InventoryState): boolean => {
+        let changed = false;
+
+        for (const item of state.items) {
+            const definition = getInventoryItemDefinition(item.definitionId);
+            if (!definition) continue;
+
+            const inventoryId = item.location.inventoryId ?? 'player';
+            const container = state.containers[inventoryId];
+            if (!container) continue;
+            const sectionSize = container.sections[item.location.section];
+            if (!sectionSize) continue;
+
+            const maxX = Math.max(0, sectionSize.columns - definition.shape.width);
+            const maxY = Math.max(0, sectionSize.rows - definition.shape.height);
+            const nextX = Math.min(maxX, Math.max(0, Math.floor(item.location.x)));
+            const nextY = Math.min(maxY, Math.max(0, Math.floor(item.location.y)));
+            if (nextX !== item.location.x || nextY !== item.location.y) {
+                item.location.x = nextX;
+                item.location.y = nextY;
+                changed = true;
+            }
+        }
+
+        return changed;
+    };
+
+    const getEntityInventoryCapacity = (entity: WorldEntity): number => {
+        if (entity.kind === 'worker') return 1;
+        if (entity.kind === 'player') return 24;
+        if (entity.kind === 'base') return 48;
+        return 0;
+    };
+
+    const ensureEntityInventoryContainer = (
+        entity: WorldEntity,
+        state: InventoryState,
+    ): { inventoryId: string; maxSlots: number } | null => {
+        const maxSlots = getEntityInventoryCapacity(entity);
+        if (maxSlots <= 0) return null;
+
+        const inventoryId = `entity:${entity.id}`;
+        const visibleSlots = Math.max(ENTITY_INVENTORY_DEFAULT_VISIBLE, maxSlots);
+        const rows = Math.max(1, Math.ceil(visibleSlots / ENTITY_INVENTORY_COLUMNS));
+        const existing = state.containers[inventoryId];
+        if (
+            !existing
+            || existing.sections.storage.columns !== ENTITY_INVENTORY_COLUMNS
+            || existing.sections.storage.rows !== rows
+            || existing.sections.hotbar.columns !== ENTITY_INVENTORY_COLUMNS
+            || existing.sections.hotbar.rows !== 0
+        ) {
+            state.containers[inventoryId] = {
+                id: inventoryId,
+                sections: {
+                    storage: { columns: ENTITY_INVENTORY_COLUMNS, rows },
+                    hotbar: { columns: ENTITY_INVENTORY_COLUMNS, rows: 0 },
+                },
+            };
+        }
+
+        return { inventoryId, maxSlots };
+    };
+
+    const upsertOreItem = (
+        state: InventoryState,
+        inventoryId: string,
+        quantity: number,
+    ): boolean => {
+        const itemId = `${inventoryId}:ore`;
+        const existing = state.items.find((item) => item.id === itemId);
+        if (quantity <= 0) {
+            if (!existing) return false;
+            state.items = state.items.filter((item) => item.id !== itemId);
+            return true;
+        }
+
+        if (existing) {
+            if (existing.quantity === quantity) return false;
+            existing.quantity = quantity;
+            return true;
+        }
+
+        state.items.push({
+            id: itemId,
+            definitionId: 'debug-asteroid-ore',
+            quantity,
+            durability: 1,
+            location: {
+                inventoryId,
+                section: 'storage',
+                x: 0,
+                y: 0,
+            },
+        });
+        return true;
+    };
+
     let toolInspector: ReturnType<typeof createToolInspectorPanel> | null = null;
     let onToolEquippedExternally: (toolId: string) => void = () => { };
+    const entityInventoryAdapter: EntityInventoryAdapter = {
+        getState: () => inventoryPanel?.getState() ?? null,
+        ensureEntityInventory: (entity, state) => ensureEntityInventoryContainer(entity, state),
+        syncEntityInventory: (entity, state, binding) => {
+            if (entity.kind !== 'worker') return false;
+            const carriedOre = Math.max(0, Math.floor(entity.mining?.carriedOre ?? 0));
+            const oreChanged = upsertOreItem(state, binding.inventoryId, carriedOre);
+            const posChanged = sanitizeInventoryItemLocations(state);
+            return oreChanged || posChanged;
+        },
+        onDidChange: (listener) => {
+            inventoryChangeListeners.add(listener);
+            return () => {
+                inventoryChangeListeners.delete(listener);
+            };
+        },
+        onStateChange: (state) => {
+            sanitizeInventoryItemLocations(state);
+            if (inventoryPanel) {
+                inventoryPanel.replaceState(state);
+            }
+            saveInventoryState(state);
+            resourcesPanel?.update();
+            notifyInventoryChanged();
+        },
+        onInspectItem: (selection) => {
+            inventoryItemDetails?.setSelection(selection);
+            inventoryItemDetails?.open();
+        },
+        onEquipTool: (toolId) => {
+            const next = WEAPON_DEFINITIONS.find((entry) => entry.id === toolId);
+            if (!next) return;
+            simulation.tools.setActiveTool(next);
+            inventoryPanel?.setEquippedTool(next.id);
+            toolInspector?.setActiveTool(next.id);
+            onToolEquippedExternally(next.id);
+        },
+    };
     const scene = new GameScene(
         app,
         simulation.world,
@@ -120,9 +267,25 @@ export async function bootstrapGame(): Promise<void> {
             if (!inventoryPanel) return;
             const added = inventoryPanel.addItem('debug-asteroid-ore', pendingWorkerOreDelivered);
             pendingWorkerOreDelivered -= added;
+
+            const state = inventoryPanel.getState();
+            const base = simulation.world.getEntities().find((entry) => entry.kind === 'base');
+            if (base) {
+                const binding = ensureEntityInventoryContainer(base, state);
+                if (binding) {
+                    const existingOre = state.items.find((item) => item.id === `${binding.inventoryId}:ore`)?.quantity ?? 0;
+                    upsertOreItem(state, binding.inventoryId, existingOre + added);
+                    sanitizeInventoryItemLocations(state);
+                    inventoryPanel.replaceState(state);
+                    saveInventoryState(state);
+                    notifyInventoryChanged();
+                }
+            }
+
             resourcesPanel?.update();
             panel.setStatus(`Collected ${added} ore from worker delivery.`);
         },
+        entityInventoryAdapter,
         initialEntityDetails,
         (state) => {
             metaStore.updateEntityDetails(state);
@@ -379,7 +542,9 @@ export async function bootstrapGame(): Promise<void> {
             metaStore.updateInventory(state);
         },
         onStateChange: (state) => {
+            sanitizeInventoryItemLocations(state);
             saveInventoryState(state);
+            notifyInventoryChanged();
         },
         onEquipTool: (toolId) => {
             applyEquippedTool(toolId, true);
@@ -395,8 +560,10 @@ export async function bootstrapGame(): Promise<void> {
 
     const persistedInventory = loadInventoryState();
     if (persistedInventory) {
+        sanitizeInventoryItemLocations(persistedInventory);
         inventoryPanel.replaceState(persistedInventory);
         applyEquippedTool(persistedInventory.equippedToolId, false);
+        notifyInventoryChanged();
     } else {
         saveInventoryState(inventoryPanel.getState());
     }
@@ -404,6 +571,16 @@ export async function bootstrapGame(): Promise<void> {
     // Create resources panel in top-left corner
     resourcesPanel = createResourcesPanel({
         inventoryState: inventoryPanel.getState(),
+        getInventoryBucket: (inventoryId) => {
+            if (inventoryId === 'player') return 'held';
+            if (!inventoryId.startsWith('entity:')) return 'ignore';
+
+            const entityId = inventoryId.slice('entity:'.length);
+            const entity = simulation.world.getEntityById(entityId);
+            if (!entity) return 'ignore';
+            if (entity.mobility === 'static') return 'storage';
+            return 'held';
+        },
     });
 
     if (pendingWorkerOreDelivered > 0) {
@@ -418,8 +595,10 @@ export async function bootstrapGame(): Promise<void> {
     inventoryPanel.addItem = (definitionId: string, quantity: number) => {
         const added = inventoryAddItem(definitionId, quantity);
         if (added > 0) {
+            sanitizeInventoryItemLocations(inventoryPanel.getState());
             resourcesPanel?.update();
             saveInventoryState(inventoryPanel.getState());
+            notifyInventoryChanged();
         }
         return added;
     };
@@ -435,13 +614,13 @@ export async function bootstrapGame(): Promise<void> {
         }
 
         if (event.type === 'TileDamaged') {
+            // TileDamaged fires for player left-click mining (MineTile command).
+            // Entity-based mining (workers, player MinePlayer command) deliver via
+            // pendingWorkerOreDeliveries in the fixed-step loop, so we skip those here.
             let collected = 0;
             for (const hit of event.hits) {
-                if (!hit.opened) continue;
-                const tile = simulation.world.getTile(hit.x, hit.y);
-                if (!tile) continue;
-                const dropId = getDropDefinitionIdForBiome(tile.biome);
-                const added = inventoryPanel?.addItem(dropId, 1) ?? 0;
+                if (!hit.opened || hit.oreYield <= 0) continue;
+                const added = inventoryPanel?.addItem(hit.oreDefinitionId, hit.oreYield) ?? 0;
                 collected += added;
             }
 
