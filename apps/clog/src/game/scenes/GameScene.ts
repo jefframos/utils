@@ -51,6 +51,7 @@ export class GameScene {
     private selectedEntityId: string | null = null;
     private fixedUpdateAccumulatorMs = 0;
     private readonly onWorkerOreDelivered: (amount: number) => void;
+    private readonly onPlayerOreCollected: (oreDefinitionId: string, amount: number) => void;
     private buildMode: {
         builderEntityId: string;
         selectedBuildableType: BuildableEntityType | null;
@@ -70,6 +71,7 @@ export class GameScene {
         private readonly onToolSelected: (toolId: string) => void,
         private readonly getAvailableOre: () => number = () => 0,
         onWorkerOreDelivered: (amount: number) => void = () => { },
+        onPlayerOreCollected: (oreDefinitionId: string, amount: number) => void = () => { },
         private readonly inventoryAdapter?: EntityInventoryAdapter,
         initialEntityDetailsWindowState?: EntityDetailsWindowMeta,
         onEntityDetailsWindowStateChange?: (state: EntityDetailsWindowMeta) => void,
@@ -85,6 +87,7 @@ export class GameScene {
             height: 320,
         };
         this.onWorkerOreDelivered = onWorkerOreDelivered;
+        this.onPlayerOreCollected = onPlayerOreCollected;
         this.gameCamera = new GameCamera(this.app, this.camera);
         this.viewportSpace = ViewportSpace.initialize(this.app, this.gameCamera);
         this.renderer = new WorldRenderer(this.world, this.worldLayer, this.worldOverlayLayer);
@@ -613,11 +616,7 @@ export class GameScene {
                     disabled: !canMove,
                     disabledReason: walkDisabledReason,
                     onSelect: canMove ? () => {
-                        if (selectedEntity.kind === 'worker') {
-                            this.transport.send({ type: 'MoveWorker', workerId: selectedEntity.id, x: tileX, y: tileY });
-                        } else if (selectedEntity.kind === 'player') {
-                            this.transport.send({ type: 'MovePlayer', x: tileX, y: tileY });
-                        }
+                        this.transport.send({ type: 'MoveEntity', entityId: selectedEntity.id, x: tileX, y: tileY });
                     } : undefined,
                 });
             }
@@ -639,11 +638,7 @@ export class GameScene {
                     disabled: !canMine,
                     disabledReason: mineDisabledReason,
                     onSelect: canMine ? () => {
-                        if (selectedEntity.kind === 'worker') {
-                            this.transport.send({ type: 'MineWorker', workerId: selectedEntity.id, x: tileX, y: tileY });
-                        } else if (selectedEntity.kind === 'player') {
-                            this.transport.send({ type: 'MinePlayer', x: tileX, y: tileY, toolId: this.getPrimaryTool().id });
-                        }
+                        this.transport.send({ type: 'MineEntity', entityId: selectedEntity.id, x: tileX, y: tileY });
                     } : undefined,
                 });
             }
@@ -721,6 +716,10 @@ export class GameScene {
             if (deliveries.length > 0) {
                 const totalOre = deliveries.reduce((sum, delivery) => sum + delivery.amount, 0);
                 this.onWorkerOreDelivered(totalOre);
+            }
+            const playerOre = this.world.drainPlayerOreCollected();
+            for (const { oreDefinitionId, amount } of playerOre) {
+                if (amount > 0) this.onPlayerOreCollected(oreDefinitionId, amount);
             }
             // Refresh selected entity details if entity is mining or moving
             if (this.selectedEntityId) {

@@ -77,6 +77,23 @@ export type MinePlayerCommand = {
     toolId?: string;
 };
 
+/** Generic entity move — works for any entity with a walking component. */
+export type MoveEntityCommand = {
+    type: 'MoveEntity';
+    entityId: string;
+    x: number;
+    y: number;
+};
+
+/** Generic entity mine — works for any entity with a miningDef component. */
+export type MineEntityCommand = {
+    type: 'MineEntity';
+    entityId: string;
+    x: number;
+    y: number;
+    repeat?: boolean;
+};
+
 export type InterruptWorkerCommand = {
     type: 'InterruptWorkerCommand';
     workerId: string;
@@ -138,6 +155,8 @@ export type GameCommand =
     | MovePlayerCommand
     | MineWorkerCommand
     | MinePlayerCommand
+    | MoveEntityCommand
+    | MineEntityCommand
     | InterruptWorkerCommand
     | ClearWorkerCommandsCommand
     | RemoveQueuedWorkerCommand

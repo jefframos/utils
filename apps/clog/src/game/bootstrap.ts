@@ -14,7 +14,7 @@ import { createToolInspectorPanel } from './ui/ToolInspectorPanel';
 import { createWindowControlRail } from './ui/WindowControlRail';
 import { createDebugGraphWindow } from './ui/DebugGraphWindow';
 import { ViewportSpace } from './core/ViewportSpace';
-import { getInventoryItemDefinition, getTotalResourceCount, type InventoryState } from './inventory/InventoryModel';
+import { createDebugInventoryState, getInventoryItemDefinition, getTotalResourceCount, type InventoryState } from './inventory/InventoryModel';
 import {
     createWorldAutosave,
     loadInventoryState,
@@ -285,6 +285,20 @@ export async function bootstrapGame(): Promise<void> {
             resourcesPanel?.update();
             panel.setStatus(`Collected ${added} ore from worker delivery.`);
         },
+        // Player mines directly into their own inventory — no carry/return cycle.
+        (oreDefinitionId, amount) => {
+            if (!inventoryPanel || amount <= 0) return;
+            let added = inventoryPanel.addItem(oreDefinitionId, amount);
+            if (added === 0 && oreDefinitionId !== 'debug-asteroid-ore') {
+                // Fallback so player mining never silently drops yield if a drop id is missing.
+                added = inventoryPanel.addItem('debug-asteroid-ore', amount);
+            }
+            if (added > 0) {
+                worldAutosave.flush();
+                resourcesPanel?.update();
+                panel.setStatus(`Collected ${added} ore.`);
+            }
+        },
         entityInventoryAdapter,
         initialEntityDetails,
         (state) => {
@@ -313,6 +327,80 @@ export async function bootstrapGame(): Promise<void> {
             persistTimer = null;
         }, 120);
     });
+
+    // -------------------------------------------------------------------------
+    // Debug helpers — callable from the browser console.
+    // asteroidValleyDebug.player()   → dump player entity state as a string
+    // asteroidValleyDebug.entity(id) → dump any entity by id
+    // asteroidValleyDebug.log()      → print player trace to console
+    // -------------------------------------------------------------------------
+    const buildEntityTrace = (entityId: string): string => {
+        const entity = simulation.world.getEntityById(entityId);
+        if (!entity) return `[debug] entity "${entityId}" not found`;
+
+        const lines: string[] = [];
+        lines.push(`=== Entity: ${entity.id} (kind=${entity.kind}) ===`);
+        lines.push(`  pos        : (${entity.x.toFixed(2)}, ${entity.y.toFixed(2)})`);
+        lines.push(`  deployed   : ${entity.deployed ?? 'n/a'}`);
+        lines.push(`  paused     : ${entity.commandsPaused ?? false}`);
+        lines.push(`  toolId     : ${entity.toolId ?? 'none'}`);
+        lines.push(`  miningDef  : ${entity.miningDef ? `power=${entity.miningDef.minePower} cooldown=${entity.miningDef.mineCooldownMs}ms carry=${entity.miningDef.carryCapacity}` : 'none'}`);
+        lines.push(`  walking    : ${entity.walking ? `speed=${entity.walking.speedTilesPerSecond}t/s` : 'none'}`);
+
+        const cmdList = entity.commandList as { current?: { id: string; type: string; payload: object } | null; queue?: Array<{ id: string; type: string; payload: object }> } | null;
+        if (cmdList) {
+            const cur = cmdList.current;
+            lines.push(`  cmd.current: ${cur ? `[${cur.id}] ${cur.type} ${JSON.stringify(cur.payload)}` : 'none'}`);
+            const q = cmdList.queue ?? [];
+            lines.push(`  cmd.queue  : ${q.length === 0 ? 'empty' : q.map((c) => `[${c.id}] ${c.type} ${JSON.stringify(c.payload)}`).join(' | ')}`);
+        } else {
+            lines.push(`  cmd        : no command list`);
+        }
+
+        if (entity.movement) {
+            const mv = entity.movement;
+            lines.push(`  movement   : mode=${mv.mode} step=${mv.stepIndex}/${mv.path.length} homeId=${mv.homeId ?? 'n/a'}`);
+            const dest = mv.path[mv.path.length - 1];
+            lines.push(`  move dest  : (${dest?.x ?? '?'}, ${dest?.y ?? '?'})`);
+        } else {
+            lines.push(`  movement   : none`);
+        }
+
+        if (entity.mining) {
+            const m = entity.mining;
+            lines.push(`  mining     : target=(${m.targetX},${m.targetY}) approach=(${m.approachX},${m.approachY}) anchor=(${m.anchorX},${m.anchorY})`);
+            lines.push(`  mining     : lastMined=(${m.lastMinedX},${m.lastMinedY}) carried=${m.carriedOre} cooldown=${m.cooldownMs.toFixed(0)}ms repeat=${m.repeat}`);
+        } else {
+            lines.push(`  mining     : none`);
+        }
+
+        const frontier = entity.mining
+            ? simulation.world.isMineableFrontierSolid(entity.mining.targetX, entity.mining.targetY)
+            : null;
+        if (frontier !== null) {
+            lines.push(`  target ok  : ${frontier ? 'YES - tile is mineable frontier' : 'NO - tile not on frontier!'}`);
+        }
+
+        return lines.join('\n');
+    };
+
+    const debugApi = {
+        player: () => buildEntityTrace(simulation.world.getMainPlayerEntityId()),
+        entity: (id: string) => buildEntityTrace(id),
+        log: () => {
+            const trace = buildEntityTrace(simulation.world.getMainPlayerEntityId());
+            console.log(trace);
+            return trace;
+        },
+        logAll: () => {
+            const entities = simulation.world.getEntities();
+            const traces = entities.map((e) => buildEntityTrace(e.id));
+            console.log(traces.join('\n\n'));
+            return traces.join('\n\n');
+        },
+    };
+
+    (window as Window & { asteroidValleyDebug?: typeof debugApi }).asteroidValleyDebug = debugApi;
 
     // Expose game meta for quick inspection in devtools.
     (
@@ -500,7 +588,17 @@ export async function bootstrapGame(): Promise<void> {
         },
         onGenerate: (seed) => {
             transport.send({ type: 'GenerateWorld', seed });
-            panel.setStatus(`Generated map with seed ${seed}.`);
+            pendingWorkerOreDelivered = 0;
+            if (inventoryPanel) {
+                const freshInventory = createDebugInventoryState();
+                freshInventory.equippedToolId = simulation.tools.getActiveTool().id;
+                inventoryPanel.replaceState(freshInventory);
+                sanitizeInventoryItemLocations(freshInventory);
+                saveInventoryState(freshInventory);
+                notifyInventoryChanged();
+                resourcesPanel?.update();
+            }
+            panel.setStatus(`Generated fresh map with seed ${seed}. Resources reset.`);
         },
         onSave: () => {
             saveSnapshot(simulation.world.toSnapshot());
@@ -614,12 +712,11 @@ export async function bootstrapGame(): Promise<void> {
         }
 
         if (event.type === 'TileDamaged') {
-            // TileDamaged fires for player left-click mining (MineTile command).
-            // Entity-based mining (workers, player MinePlayer command) deliver via
-            // pendingWorkerOreDeliveries in the fixed-step loop, so we skip those here.
+            // TileDamaged is emitted only for direct left-click tool mining (MineTile command).
+            // Entity-assigned mining (workers, player Mine Here) deliver via ore delivery callbacks.
             let collected = 0;
             for (const hit of event.hits) {
-                if (!hit.opened || hit.oreYield <= 0) continue;
+                if (hit.oreYield <= 0) continue;
                 const added = inventoryPanel?.addItem(hit.oreDefinitionId, hit.oreYield) ?? 0;
                 collected += added;
             }

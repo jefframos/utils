@@ -70,23 +70,12 @@ export class GameSimulation {
         }
 
         if (command.type === 'MinePlayer') {
-            const toolId = command.toolId ?? this.mainPlayerTools.getActiveTool().id;
-            const result = this.world.mineMainPlayerAt(command.x, command.y, toolId);
+            const result = this.world.startPlayerMining(command.x, command.y);
             if (!result.ok) return [];
-
-            const events: GameEvent[] = [];
-            if (result.hits.length > 0) {
-                events.push({ type: 'TileDamaged', hits: result.hits });
-            }
-
-            if (result.hits.some((hit) => hit.opened)) {
-                events.push({ type: 'TileMined', x: command.x, y: command.y });
-            } else if (result.hits.length > 0) {
-                events.push({ type: 'TileMined', x: command.x, y: command.y });
-            }
-
-            events.push({ type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() });
-            return events;
+            return [
+                { type: 'PlayerMiningStarted', x: command.x, y: command.y },
+                { type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() },
+            ];
         }
 
         if (command.type === 'GenerateWorld') {
@@ -282,6 +271,60 @@ export class GameSimulation {
                 },
                 { type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() },
             ];
+        }
+
+        if (command.type === 'MoveEntity') {
+            console.log(`[sim:MoveEntity] entityId=${command.entityId} target=(${command.x},${command.y})`);
+            const entity = this.world.getEntityById(command.entityId);
+            if (!entity) { console.warn(`[sim:MoveEntity] entity not found: ${command.entityId}`); return []; }
+            console.log(`[sim:MoveEntity] kind=${entity.kind} pos=(${entity.x.toFixed(1)},${entity.y.toFixed(1)}) paused=${entity.commandsPaused} movement=${!!entity.movement} mining=${!!entity.mining}`);
+            if (entity.kind === 'worker') {
+                const moved = this.world.moveWorkerTo(command.entityId, command.x, command.y);
+                console.log(`[sim:MoveEntity] worker result ok=${moved.ok}${'reason' in moved ? ` reason=${moved.reason}` : ''}`);
+                if (!moved.ok) return [{ type: 'WorkerActionFailed', action: 'move', id: command.entityId, reason: moved.reason }];
+                return [
+                    { type: 'WorkerMoved', workerId: moved.worker.id, x: command.x, y: command.y },
+                    { type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() },
+                ];
+            }
+            if (entity.kind === 'player') {
+                const moved = this.world.moveMainPlayerTo(command.x, command.y);
+                console.log(`[sim:MoveEntity] player result ok=${moved.ok}${'reason' in moved ? ` reason=${moved.reason}` : ''}`);
+                if (!moved.ok) return [];
+                return [
+                    { type: 'PlayerMoved', x: moved.player.x, y: moved.player.y },
+                    { type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() },
+                ];
+            }
+            console.warn(`[sim:MoveEntity] unhandled kind: ${entity.kind}`);
+            return [];
+        }
+
+        if (command.type === 'MineEntity') {
+            console.log(`[sim:MineEntity] entityId=${command.entityId} target=(${command.x},${command.y}) repeat=${command.repeat ?? true}`);
+            const entity = this.world.getEntityById(command.entityId);
+            if (!entity) { console.warn(`[sim:MineEntity] entity not found: ${command.entityId}`); return []; }
+            console.log(`[sim:MineEntity] kind=${entity.kind} pos=(${entity.x.toFixed(1)},${entity.y.toFixed(1)}) paused=${entity.commandsPaused} miningDef=${!!entity.miningDef} movement=${!!entity.movement} mining=${!!entity.mining}`);
+            if (entity.kind === 'worker') {
+                const started = this.world.startWorkerMining(command.entityId, command.x, command.y, command.repeat ?? true);
+                console.log(`[sim:MineEntity] worker result ok=${started.ok}${'reason' in started ? ` reason=${started.reason}` : ''}`);
+                if (!started.ok) return [{ type: 'WorkerActionFailed', action: 'mine', id: command.entityId, reason: started.reason }];
+                return [
+                    { type: 'WorkerMiningStarted', workerId: started.worker.id, x: command.x, y: command.y },
+                    { type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() },
+                ];
+            }
+            if (entity.kind === 'player') {
+                const result = this.world.startPlayerMining(command.x, command.y, command.repeat ?? true);
+                console.log(`[sim:MineEntity] player result ok=${result.ok}${'reason' in result ? ` reason=${result.reason}` : ''}`);
+                if (!result.ok) return [];
+                return [
+                    { type: 'PlayerMiningStarted', x: command.x, y: command.y },
+                    { type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() },
+                ];
+            }
+            console.warn(`[sim:MineEntity] unhandled kind: ${entity.kind}`);
+            return [];
         }
 
         if (command.type === 'InterruptWorkerCommand') {

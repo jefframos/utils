@@ -121,12 +121,13 @@ export type WorkerEntityCommandPayload = {
 
 export type WorkerEntityCommandList = CommandListState<WorkerEntityCommandType, WorkerEntityCommandPayload>;
 
-export type PlayerEntityCommandType = 'move' | 'build';
+export type PlayerEntityCommandType = 'move' | 'build' | 'mine';
 
 export type PlayerEntityCommandPayload = {
     x?: number;
     y?: number;
     buildableType?: 'beacon';
+    repeat?: boolean;
 };
 
 export type PlayerEntityCommandList = CommandListState<PlayerEntityCommandType, PlayerEntityCommandPayload>;
@@ -212,6 +213,7 @@ export class WorldModel {
     private readonly beacons: BeaconNode[] = [];
     private readonly mineReservations = new Map<string, string>();
     private readonly pendingWorkerOreDeliveries: WorkerOreDelivery[] = [];
+    private readonly pendingPlayerOreCollected: { amount: number; oreDefinitionId: string }[] = [];
     private readonly pendingWorkerDamageHits: TileDamageHit[] = [];
     private readonly scanNearestBehavior = new ScanNearestBehavior({
         areaRadius: 9,
@@ -270,6 +272,7 @@ export class WorldModel {
         this.beacons.length = 0;
         this.mineReservations.clear();
         this.pendingWorkerOreDeliveries.length = 0;
+        this.pendingPlayerOreCollected.length = 0;
         this.nextBeaconIndex = 1;
         this.nextWorkerIndex = 1;
         this.widthValue = WORLD_WIDTH;
@@ -422,6 +425,9 @@ export class WorldModel {
                         mineCooldownMs: 160,
                         carryCapacity: 999,
                     };
+                    normalizedEntity.toolId = normalizedEntity.toolId ?? 'starter-cutter';
+                    normalizedEntity.minePower = normalizedEntity.minePower ?? normalizedEntity.miningDef.minePower;
+                    normalizedEntity.mineCooldownMs = normalizedEntity.mineCooldownMs ?? normalizedEntity.miningDef.mineCooldownMs;
                 } else if (normalizedEntity.kind === 'worker') {
                     const definition = getWorkerDefinition(normalizedEntity.unitType ?? 'basic-worker');
                     normalizedEntity.visibilityRadius = definition.visibilityRadius;
@@ -484,6 +490,10 @@ export class WorldModel {
     drainWorkerOreDeliveries(): WorkerOreDelivery[] {
         const deliveries = this.pendingWorkerOreDeliveries.splice(0, this.pendingWorkerOreDeliveries.length);
         return deliveries;
+    }
+
+    drainPlayerOreCollected(): { amount: number; oreDefinitionId: string }[] {
+        return this.pendingPlayerOreCollected.splice(0, this.pendingPlayerOreCollected.length);
     }
 
     drainWorkerDamageHits(): TileDamageHit[] {
@@ -797,19 +807,22 @@ export class WorldModel {
         return this.isMineableFrontierSolid(x, y);
     }
 
-    mineMainPlayerAt(x: number, y: number, toolId: string): { ok: true; hits: TileDamageHit[] } | { ok: false; reason: string } {
+    startPlayerMining(x: number, y: number, repeat = true): PlayerActionResult {
         const player = this.getMainPlayerEntity();
-        if (!player) {
-            return { ok: false, reason: 'player_not_found' };
-        }
+        console.log(`[player:mine] startPlayerMining(${x},${y}) repeat=${repeat}`);
+        if (!player) { console.warn('[player:mine] FAIL – player entity not found'); return { ok: false, reason: 'not_found' }; }
+        if (!player.miningDef) { console.warn('[player:mine] FAIL – player has no miningDef'); return { ok: false, reason: 'invalid_target' }; }
 
-        const tool = getToolDefinition(toolId);
-        if (!tool) {
-            return { ok: false, reason: 'tool_not_found' };
-        }
-
-        const hits = this.mineWithTool(x, y, tool.tileDamage, tool.damageMode ?? 'precise', tool.bluntRadius);
-        return { ok: true, hits };
+        const commandList = this.getPlayerCommandList(player);
+        commandList.enqueue('mine', { x, y, repeat }, 'append');
+        this.setPlayerCommandList(player, commandList);
+        console.log(`[player:mine] enqueued mine cmd. paused=${player.commandsPaused} hasMovement=${!!player.movement} hasMining=${!!player.mining}`);
+        if (player.commandsPaused) player.commandsPaused = false;
+        this.tryStartNextPlayerCommand(player);
+        const snap = this.getPlayerCommandList(player).snapshot();
+        console.log(`[player:mine] after tryStart: current=${snap.current ? snap.current.type : 'none'} mining=${!!player.mining} movement=${!!player.movement}`);
+        this.markChunkDirtyAt(player.x, player.y);
+        return { ok: true, player: { ...player } };
     }
 
     moveMainPlayerTo(x: number, y: number): PlayerActionResult {
@@ -851,6 +864,7 @@ export class WorldModel {
         const player = this.getMainPlayerEntity();
         if (!player) return { ok: false, reason: 'not_found' };
         player.movement = null;
+        if (player.mining) this.clearWorkerMining(player);
         this.completeCurrentPlayerCommand(player);
         player.commandsPaused = false;
         this.tryStartNextPlayerCommand(player);
@@ -862,6 +876,7 @@ export class WorldModel {
         const player = this.getMainPlayerEntity();
         if (!player) return { ok: false, reason: 'not_found' };
         player.movement = null;
+        if (player.mining) this.clearWorkerMining(player);
         player.commandsPaused = false;
         const commandList = this.getPlayerCommandList(player);
         commandList.clearAll();
@@ -1440,15 +1455,119 @@ export class WorldModel {
                 }
 
                 if (player.movement.stepIndex >= player.movement.path.length) {
+                    const wasApproach = player.movement.mode === 'move' && player.mining != null;
                     player.movement = null;
-                    this.completeCurrentPlayerCommand(player);
-                    this.tryStartNextPlayerCommand(player);
+                    if (!wasApproach) {
+                        // Only complete a move command; approach to mining position is handled by mining tick.
+                        this.completeCurrentPlayerCommand(player);
+                        this.tryStartNextPlayerCommand(player);
+                    }
                 }
             } else if (!player.commandsPaused) {
                 this.tryStartNextPlayerCommand(player);
             }
 
-            if (player.x !== previousX || player.y !== previousY || (!player.commandsPaused && player.movement)) {
+            // Player mining tick — mirrors worker mining but collects ore directly (no carry/return cycle).
+            if (!player.commandsPaused && player.mining && !player.movement) {
+                const mining = player.mining;
+                const atApproach = Math.round(player.x) === mining.approachX && Math.round(player.y) === mining.approachY;
+                const targetStillMineable = this.isMineableFrontierSolid(mining.targetX, mining.targetY);
+
+                if (!targetStillMineable || !atApproach) {
+                    const plan = this.findClosestMineTargetPlan(player, {
+                        anchorX: mining.lastMinedX,
+                        anchorY: mining.lastMinedY,
+                        lastMinedX: mining.lastMinedX,
+                        lastMinedY: mining.lastMinedY,
+                    });
+                    if (!plan) {
+                        this.clearWorkerMining(player);
+                        this.completeCurrentPlayerCommand(player);
+                        this.tryStartNextPlayerCommand(player);
+                    } else if (this.reserveMineTarget(plan.targetX, plan.targetY, player.id)) {
+                        mining.targetX = plan.targetX;
+                        mining.targetY = plan.targetY;
+                        mining.approachX = plan.approachX;
+                        mining.approachY = plan.approachY;
+                        mining.anchorX = plan.anchorX;
+                        mining.anchorY = plan.anchorY;
+                        mining.cooldownMs = 0;
+                        mining.miningProgressMs = 0;
+                        player.movement = { path: plan.path, stepIndex: 1, progress: 0, mode: 'move' };
+                    }
+                } else {
+                    const tool = player.toolId ? getToolDefinition(player.toolId) : undefined;
+                    if (!tool) {
+                        this.clearWorkerMining(player);
+                        this.completeCurrentPlayerCommand(player);
+                        this.tryStartNextPlayerCommand(player);
+                    } else if (mining.cooldownMs > 0) {
+                        mining.cooldownMs = Math.max(0, mining.cooldownMs - deltaMs);
+                    } else {
+                        const rawDamage = Math.max(1, Math.floor(tool.tileDamage * Math.max(1, player.minePower ?? 1)));
+                        const hit = this.mineSingleAt(mining.targetX, mining.targetY, rawDamage);
+                        if (!hit) {
+                            this.releaseMineTarget(mining.targetX, mining.targetY, player.id);
+                            this.clearWorkerMining(player);
+                            this.completeCurrentPlayerCommand(player);
+                            this.tryStartNextPlayerCommand(player);
+                        } else {
+                            this.pendingWorkerDamageHits.push(hit);
+                            const toolCadenceMs = Math.max(60, Math.round(1000 / Math.max(0.1, tool.hitsPerSecond)));
+                            const entityCadenceMs = Math.max(0, Math.round(player.mineCooldownMs ?? 0));
+                            mining.cooldownMs = entityCadenceMs > 0 ? Math.min(entityCadenceMs, toolCadenceMs) : toolCadenceMs;
+                            mining.miningProgressMs += deltaMs;
+
+                            if (hit.oreYield > 0) {
+                                // Player collects ore immediately — no carry/return cycle.
+                                this.pendingPlayerOreCollected.push({ amount: hit.oreYield, oreDefinitionId: hit.oreDefinitionId });
+                            }
+
+                            if (hit.opened) {
+                                mining.lastMinedX = mining.targetX;
+                                mining.lastMinedY = mining.targetY;
+                                this.releaseMineTarget(mining.targetX, mining.targetY, player.id);
+
+                                const nextPlan = this.findClosestMineTargetPlan(player, {
+                                    anchorX: mining.lastMinedX,
+                                    anchorY: mining.lastMinedY,
+                                    lastMinedX: mining.lastMinedX,
+                                    lastMinedY: mining.lastMinedY,
+                                });
+
+                                if (nextPlan && this.reserveMineTarget(nextPlan.targetX, nextPlan.targetY, player.id)) {
+                                    mining.targetX = nextPlan.targetX;
+                                    mining.targetY = nextPlan.targetY;
+                                    mining.approachX = nextPlan.approachX;
+                                    mining.approachY = nextPlan.approachY;
+                                    mining.anchorX = nextPlan.anchorX;
+                                    mining.anchorY = nextPlan.anchorY;
+                                    mining.cooldownMs = 0;
+                                    mining.miningProgressMs = 0;
+                                    player.movement = { path: nextPlan.path, stepIndex: 1, progress: 0, mode: 'move' };
+                                } else if (mining.repeat) {
+                                    const repeatX = mining.lastMinedX;
+                                    const repeatY = mining.lastMinedY;
+                                    this.clearWorkerMining(player);
+                                    const cmdList = this.getPlayerCommandList(player);
+                                    cmdList.completeCurrent();
+                                    if (cmdList.snapshot().queue.length === 0) {
+                                        cmdList.enqueue('mine', { x: repeatX, y: repeatY, repeat: true }, 'append');
+                                    }
+                                    this.setPlayerCommandList(player, cmdList);
+                                    this.tryStartNextPlayerCommand(player);
+                                } else {
+                                    this.clearWorkerMining(player);
+                                    this.completeCurrentPlayerCommand(player);
+                                    this.tryStartNextPlayerCommand(player);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (player.x !== previousX || player.y !== previousY || (!player.commandsPaused && (player.movement || player.mining))) {
                 this.markChunkDirtyAt(previousX, previousY);
                 this.revealAround(player.x, player.y, Math.max(1, Math.floor(player.visibilityRadius)));
                 this.ensureChunksAround(player.x, player.y, 1);
@@ -2432,6 +2551,9 @@ export class WorldModel {
                 mineCooldownMs: 160,
                 carryCapacity: 999,
             };
+            existing.toolId = existing.toolId ?? 'starter-cutter';
+            existing.minePower = existing.minePower ?? existing.miningDef.minePower;
+            existing.mineCooldownMs = existing.mineCooldownMs ?? existing.miningDef.mineCooldownMs;
             return;
         }
 
@@ -2444,6 +2566,9 @@ export class WorldModel {
             visibilityRadius: PLAYER_VISIBILITY_RADIUS,
             moveSpeedTilesPerSecond: PLAYER_MOVE_SPEED_TILES_PER_SECOND,
             parentId: null,
+            toolId: 'starter-cutter',
+            minePower: 1,
+            mineCooldownMs: 160,
             walking: {
                 speedTilesPerSecond: PLAYER_MOVE_SPEED_TILES_PER_SECOND,
             },
@@ -2781,21 +2906,46 @@ export class WorldModel {
     }
 
     private tryStartNextPlayerCommand(player: WorldEntity): void {
-        if (player.movement) return;
-        if (player.commandsPaused) return;
+        if (player.movement) { console.log('[player:tryStart] skip – already moving'); return; }
+        if (player.mining) { console.log('[player:tryStart] skip – already mining'); return; }
+        if (player.commandsPaused) { console.log('[player:tryStart] skip – commands paused'); return; }
 
         const commandList = this.getPlayerCommandList(player);
         const state = commandList.snapshot();
-        if (state.current) return;
+        if (state.current) { console.log(`[player:tryStart] skip – current cmd already active: ${state.current.type}`); return; }
 
         while (true) {
             const next = commandList.shiftNext();
             if (!next) {
+                console.log('[player:tryStart] queue empty, nothing to start');
                 this.setPlayerCommandList(player, commandList);
                 return;
             }
 
+            console.log(`[player:tryStart] dequeued cmd: ${next.type} payload=${JSON.stringify(next.payload)}`);
+
+            if (next.type === 'mine') {
+                if (!Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
+                    console.warn('[player:tryStart] mine cmd has invalid coords, skipping');
+                    commandList.completeCurrent();
+                    continue;
+                }
+                const tx = Number(next.payload.x);
+                const ty = Number(next.payload.y);
+                const frontierOk = this.isMineableFrontierSolid(tx, ty);
+                console.log(`[player:tryStart] mine target=(${tx},${ty}) isFrontierSolid=${frontierOk} playerPos=(${player.x.toFixed(1)},${player.y.toFixed(1)})`);
+                const result = this.beginWorkerMining(player, tx, ty, next.payload.repeat !== false);
+                console.log(`[player:tryStart] beginWorkerMining => ok=${result.ok}${'reason' in result ? ` reason=${result.reason}` : ''}`);
+                if (result.ok) {
+                    this.setPlayerCommandList(player, commandList);
+                    return;
+                }
+                commandList.completeCurrent();
+                continue;
+            }
+
             if (next.type !== 'move' || !Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
+                console.warn(`[player:tryStart] unknown/invalid cmd type "${next.type}", skipping`);
                 commandList.completeCurrent();
                 continue;
             }
@@ -2805,17 +2955,19 @@ export class WorldModel {
 
             this.ensureWorldContainsTile(tx, ty);
             const tile = this.getTile(tx, ty);
-            if (!tile || tile.solid || tile.visibility === 'Unknown' || this.isEntityOccupied(tx, ty, player.id)) {
-                commandList.completeCurrent();
-                continue;
-            }
+            if (!tile) { console.warn(`[player:tryStart] move target (${tx},${ty}) – tile not found`); commandList.completeCurrent(); continue; }
+            if (tile.solid) { console.warn(`[player:tryStart] move target (${tx},${ty}) – tile is solid`); commandList.completeCurrent(); continue; }
+            if (tile.visibility === 'Unknown') { console.warn(`[player:tryStart] move target (${tx},${ty}) – tile unknown`); commandList.completeCurrent(); continue; }
+            if (this.isEntityOccupied(tx, ty, player.id)) { console.warn(`[player:tryStart] move target (${tx},${ty}) – occupied`); commandList.completeCurrent(); continue; }
 
             const path = this.findOpenPath(player.x, player.y, tx, ty, 20000);
             if (!path || path.length <= 1) {
+                console.warn(`[player:tryStart] move target (${tx},${ty}) – no path found`);
                 commandList.completeCurrent();
                 continue;
             }
 
+            console.log(`[player:tryStart] starting move to (${tx},${ty}) path length=${path.length}`);
             player.movement = { path, stepIndex: 1, progress: 0, mode: 'move' };
             this.setPlayerCommandList(player, commandList);
             return;
