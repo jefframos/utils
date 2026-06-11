@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { WorldModel } from '../src/game/world/WorldModel';
 import { getBiomeGenerationNodeGraphMermaid, sampleBiomeAtPosition } from '../src/game/world/noise';
+import { getWorkerDefinition } from '../src/game/content/workers';
 
 describe('biome graph generation', () => {
     it('produces asteroid-dominant worlds with themed asteroid families', () => {
@@ -111,6 +112,228 @@ describe('biome graph generation', () => {
         expect(restored.getBeacons().length).toBe(1);
         expect(restored.getBeacons()[0].x).toBe(world.baseX + 2);
         expect(restored.getTile(world.baseX + 1, world.baseY)?.visibility).not.toBe('Unknown');
+    });
+
+    it('finds entities from tile hit tests', () => {
+        const world = new WorldModel(1337);
+        const placed = world.placeBeacon(world.baseX + 2, world.baseY);
+        expect(placed).toBeTruthy();
+
+        const beaconEntity = world.getEntities().find((entry) => entry.kind === 'beacon');
+        expect(beaconEntity).toBeTruthy();
+        expect(world.getEntityAtTile(world.baseX + 2, world.baseY)?.id).toBe(beaconEntity?.id);
+
+        const baseEntity = world.getEntities().find((entry) => entry.kind === 'base');
+        expect(baseEntity).toBeTruthy();
+        expect(world.getEntityAtTile(world.baseX + 1, world.baseY + 1)?.id).toBe(baseEntity?.id);
+    });
+
+    it('removes beacons and reparents children to preserve links', () => {
+        const world = new WorldModel(1337);
+        const first = world.placeBeacon(world.baseX + 2, world.baseY);
+        const second = world.placeBeacon(world.baseX + 4, world.baseY);
+        expect(first).toBeTruthy();
+        expect(second).toBeTruthy();
+
+        const firstEntityId = `entity-${first?.id}`;
+        const secondEntityId = `entity-${second?.id}`;
+        const beforeParent = world.getEntityById(secondEntityId);
+        expect(beforeParent?.parentId).toBe(firstEntityId);
+
+        const removed = world.removeBeaconByEntityId(firstEntityId);
+        expect(removed.ok).toBe(true);
+        expect(world.getEntityById(firstEntityId)).toBeNull();
+
+        const secondEntity = world.getEntityById(secondEntityId);
+        expect(secondEntity).toBeTruthy();
+        expect(secondEntity?.parentId).toBe('entity-base');
+    });
+
+    it('allows placing a beacon on an explored solid tile', () => {
+        const world = new WorldModel(1337);
+        const x = Math.min(world.width - 3, world.baseX + 22);
+        const y = world.baseY;
+        const tile = world.getTile(x, y);
+        expect(tile).toBeTruthy();
+        if (!tile) return;
+
+        tile.solid = true;
+        tile.visibility = 'Revealed';
+
+        const beacon = world.placeBeacon(x, y);
+        expect(beacon).toBeTruthy();
+        expect(world.getEntities().some((entry) => entry.kind === 'beacon' && entry.x === x && entry.y === y)).toBe(true);
+    });
+
+    it('recalculates visibility when beacon is deleted', () => {
+        const world = new WorldModel(1337);
+        const x = Math.min(world.width - 3, world.baseX + 24);
+        const y = world.baseY;
+
+        const placementTile = world.getTile(x, y);
+        const probeTile = world.getTile(x + 2, y);
+        expect(placementTile).toBeTruthy();
+        expect(probeTile).toBeTruthy();
+        if (!placementTile || !probeTile) return;
+
+        for (let oy = -10; oy <= 10; oy++) {
+            for (let ox = -10; ox <= 10; ox++) {
+                const local = world.getTile(x + ox, y + oy);
+                if (!local) continue;
+                local.solid = true;
+                local.visibility = 'Unknown';
+            }
+        }
+
+        placementTile.solid = true;
+        placementTile.visibility = 'Revealed';
+        probeTile.solid = true;
+        probeTile.visibility = 'Unknown';
+
+        const baseline = new Map<string, string>();
+        for (let oy = -10; oy <= 10; oy++) {
+            for (let ox = -10; ox <= 10; ox++) {
+                const tx = x + ox;
+                const ty = y + oy;
+                const tile = world.getTile(tx, ty);
+                if (!tile) continue;
+                baseline.set(`${tx},${ty}`, tile.visibility);
+            }
+        }
+
+        const beacon = world.placeBeacon(x, y);
+        expect(beacon).toBeTruthy();
+
+        const becameVisible = new Set<string>();
+        for (const key of baseline.keys()) {
+            const [tx, ty] = key.split(',').map(Number);
+            const before = baseline.get(key);
+            const after = world.getTile(tx, ty)?.visibility;
+            if (before === 'Unknown' && after && after !== 'Unknown') {
+                becameVisible.add(key);
+            }
+        }
+        expect(becameVisible.size).toBeGreaterThan(0);
+
+        const removed = world.removeBeaconByEntityId(`entity-${beacon?.id}`);
+        expect(removed.ok).toBe(true);
+
+        let reverted = 0;
+        for (const key of becameVisible) {
+            const [tx, ty] = key.split(',').map(Number);
+            const now = world.getTile(tx, ty)?.visibility;
+            if (now === 'Unknown') {
+                reverted++;
+            }
+        }
+        expect(reverted).toBeGreaterThan(0);
+    });
+
+    it('spawns workers at base and keeps them docked until deployment', () => {
+        const world = new WorldModel(1337);
+        const definition = getWorkerDefinition('basic-worker');
+        const spawned = world.spawnWorkerAtBuilding('entity-base');
+        expect(spawned.ok).toBe(true);
+        if (!spawned.ok) return;
+
+        const workers = world.getWorkersForBuilding('entity-base');
+        expect(workers.length).toBe(1);
+        expect(workers[0].kind).toBe('worker');
+        expect(workers[0].deployed).toBe(false);
+        expect(workers[0].hp).toBe(definition.maxHp);
+        expect(workers[0].maxHp).toBe(definition.maxHp);
+        expect(workers[0].moveSpeedTilesPerSecond).toBe(definition.moveSpeedTilesPerSecond);
+        expect(workers[0].spawnTimeMs).toBe(definition.spawnTimeMs);
+        expect(workers[0].toolId).toBe(definition.toolId);
+        expect(workers[0].minePower).toBe(definition.minePower);
+        expect(workers[0].mineCooldownMs).toBe(definition.mineCooldownMs);
+        expect(workers[0].carryCapacity).toBe(definition.carryCapacity);
+        expect(workers[0].visibilityRadius).toBe(8);
+
+        const beacon = world.placeBeacon(world.baseX + 2, world.baseY);
+        expect(beacon).toBeTruthy();
+        const beaconEntity = world.getEntities().find((entry) => entry.kind === 'beacon');
+        expect(beaconEntity?.visibilityRadius).toBe(10);
+    });
+
+    it('deploys and recalls worker units', () => {
+        const world = new WorldModel(1337);
+        world.clearDirtyChunks();
+
+        const spawned = world.spawnWorkerAtBuilding('entity-base');
+        expect(spawned.ok).toBe(true);
+        if (!spawned.ok) return;
+
+        const deployed = world.deployWorker(spawned.worker.id);
+        expect(deployed.ok).toBe(true);
+        if (!deployed.ok) return;
+        expect(deployed.worker.deployed).toBe(true);
+        expect(world.getEntityAtTile(deployed.worker.x, deployed.worker.y)?.id).toBe(deployed.worker.id);
+        expect(world.getDirtyChunkKeys().length).toBeLessThan(20);
+
+        const recalled = world.recallWorker(spawned.worker.id);
+        expect(recalled.ok).toBe(true);
+        if (!recalled.ok) return;
+        expect(recalled.worker.deployed).toBe(false);
+
+        const recallAll = world.recallWorkersForBuilding('entity-base');
+        expect(recallAll.ok).toBe(true);
+    });
+
+    it('moves selected workers to reachable visible open tiles', () => {
+        const world = new WorldModel(1337);
+        const spawned = world.spawnWorkerAtBuilding('entity-base');
+        expect(spawned.ok).toBe(true);
+        if (!spawned.ok) return;
+
+        const deployed = world.deployWorker(spawned.worker.id);
+        expect(deployed.ok).toBe(true);
+        if (!deployed.ok) return;
+
+        let targetX = deployed.worker.x;
+        let targetY = deployed.worker.y;
+        for (let oy = -8; oy <= 8; oy++) {
+            for (let ox = -8; ox <= 8; ox++) {
+                const tx = deployed.worker.x + ox;
+                const ty = deployed.worker.y + oy;
+                const tile = world.getTile(tx, ty);
+                if (!tile || tile.solid || tile.visibility === 'Unknown') continue;
+                if (tx === deployed.worker.x && ty === deployed.worker.y) continue;
+                if (world.getEntityAtTile(tx, ty)) continue;
+                targetX = tx;
+                targetY = ty;
+                oy = 999;
+                break;
+            }
+        }
+
+        expect(targetX !== deployed.worker.x || targetY !== deployed.worker.y).toBe(true);
+
+        const startX = deployed.worker.x;
+        const startY = deployed.worker.y;
+        const moved = world.moveWorkerTo(spawned.worker.id, targetX, targetY);
+        expect(moved.ok).toBe(true);
+        if (!moved.ok) return;
+
+        const movingWorker = world.getEntityById(spawned.worker.id);
+        expect(movingWorker).toBeTruthy();
+        expect(movingWorker?.x).toBe(startX);
+        expect(movingWorker?.y).toBe(startY);
+        expect(movingWorker?.movement).toBeTruthy();
+
+        let steps = 0;
+        while (steps < 240) {
+            world.tickFixed(100);
+            const current = world.getEntityById(spawned.worker.id);
+            expect(current).toBeTruthy();
+            if (!current?.movement) break;
+            steps++;
+        }
+
+        const arrived = world.getEntityById(spawned.worker.id);
+        expect(arrived?.movement).toBeNull();
+        expect(Math.round(arrived?.x ?? NaN)).toBe(targetX);
+        expect(Math.round(arrived?.y ?? NaN)).toBe(targetY);
     });
 
     it('supports chained biome rules including cave and crystal cave', () => {

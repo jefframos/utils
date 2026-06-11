@@ -1,6 +1,8 @@
 import { BASE_START_X, BASE_START_Y } from '../config';
 import { GameSimulation } from '../core/GameSimulation';
 import {
+    type BuildPanelWindowMeta,
+    type EntityDetailsWindowMeta,
     type GameMeta,
     type InventoryItemDetailsWindowMeta,
     type InventoryWindowMeta,
@@ -8,9 +10,11 @@ import {
     type MinimapWindowMeta,
     type ToolInspectorWindowMeta,
 } from '../meta/GameMetaStore';
+import type { InventoryState } from '../inventory/InventoryModel';
 import type { LegacyWorldSnapshot, SnapshotV2, WorldSnapshot } from '../world/WorldModel';
 
 const SAVE_KEY = 'asteroid-valley-save-v1';
+const INVENTORY_SAVE_KEY = 'asteroid-valley-inventory-v1';
 const META_COOKIE_KEY = 'asteroid-valley-meta-v1';
 let quotaWarningShown = false;
 
@@ -103,6 +107,28 @@ export function normalizeInventoryItemDetailsMeta(candidate: Partial<InventoryIt
     };
 }
 
+export function normalizeEntityDetailsMeta(candidate: Partial<EntityDetailsWindowMeta>): EntityDetailsWindowMeta {
+    return {
+        open: candidate.open === true,
+        minimized: candidate.minimized === true,
+        left: Number.isFinite(candidate.left) ? Number(candidate.left) : Math.max(16, window.innerWidth - 300),
+        top: Number.isFinite(candidate.top) ? Number(candidate.top) : 120,
+        width: Number.isFinite(candidate.width) ? Number(candidate.width) : 280,
+        height: Number.isFinite(candidate.height) ? Number(candidate.height) : 240,
+    };
+}
+
+export function normalizeBuildPanelMeta(candidate: Partial<BuildPanelWindowMeta>): BuildPanelWindowMeta {
+    return {
+        open: candidate.open === true,
+        minimized: candidate.minimized === true,
+        left: Number.isFinite(candidate.left) ? Number(candidate.left) : 16,
+        top: Number.isFinite(candidate.top) ? Number(candidate.top) : 100,
+        width: Number.isFinite(candidate.width) ? Number(candidate.width) : 400,
+        height: Number.isFinite(candidate.height) ? Number(candidate.height) : 320,
+    };
+}
+
 export function loadMetaFromCookie(): GameMeta | null {
     try {
         const raw = getCookie(META_COOKIE_KEY);
@@ -114,7 +140,9 @@ export function loadMetaFromCookie(): GameMeta | null {
         const inventory = normalizeInventoryMeta(parsed?.windows?.inventory ?? {});
         const toolInspector = normalizeToolInspectorMeta(parsed?.windows?.toolInspector ?? {});
         const inventoryItemDetails = normalizeInventoryItemDetailsMeta(parsed?.windows?.inventoryItemDetails ?? {});
-        return { windows: { minimap, mapControls, inventory, toolInspector, inventoryItemDetails } };
+        const entityDetails = normalizeEntityDetailsMeta(parsed?.windows?.entityDetails ?? {});
+        const buildPanel = normalizeBuildPanelMeta(parsed?.windows?.buildPanel ?? {});
+        return { windows: { minimap, mapControls, inventory, toolInspector, inventoryItemDetails, entityDetails, buildPanel } };
     } catch {
         return null;
     }
@@ -128,6 +156,7 @@ export function saveMetaToCookie(meta: GameMeta): void {
             ...meta.windows,
             inventory: inventoryPersisted,
             inventoryItemDetails: detailsPersisted,
+            entityDetails: meta.windows.entityDetails,
         },
     };
     const value = encodeURIComponent(JSON.stringify(persisted));
@@ -160,6 +189,15 @@ export function loadSnapshot(): WorldSnapshot | null {
                         visibilityRadius: 7,
                         parentId: null,
                     },
+                    {
+                        id: 'entity-player-main',
+                        kind: 'player',
+                        mobility: 'dynamic',
+                        x: BASE_START_X,
+                        y: BASE_START_Y,
+                        visibilityRadius: 14,
+                        parentId: null,
+                    },
                 ],
             };
         }
@@ -173,6 +211,15 @@ export function loadSnapshot(): WorldSnapshot | null {
                     x: BASE_START_X,
                     y: BASE_START_Y,
                     visibilityRadius: 7,
+                    parentId: null,
+                },
+                {
+                    id: 'entity-player-main',
+                    kind: 'player' as const,
+                    mobility: 'dynamic' as const,
+                    x: BASE_START_X,
+                    y: BASE_START_Y,
+                    visibilityRadius: 14,
                     parentId: null,
                 },
                 ...(Array.isArray(parsed.beacons)
@@ -212,6 +259,37 @@ export function loadSnapshot(): WorldSnapshot | null {
         return null;
     } catch {
         return null;
+    }
+}
+
+export function loadInventoryState(): InventoryState | null {
+    try {
+        const raw = localStorage.getItem(INVENTORY_SAVE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as Partial<InventoryState>;
+        if (!parsed || typeof parsed !== 'object') return null;
+        if (!parsed.containers || typeof parsed.containers !== 'object') return null;
+        if (!Array.isArray(parsed.items)) return null;
+        if (typeof parsed.equippedToolId !== 'string') return null;
+
+        return {
+            containers: parsed.containers as InventoryState['containers'],
+            items: parsed.items as InventoryState['items'],
+            equippedToolId: parsed.equippedToolId,
+        };
+    } catch {
+        return null;
+    }
+}
+
+export function saveInventoryState(state: InventoryState): void {
+    try {
+        localStorage.setItem(INVENTORY_SAVE_KEY, JSON.stringify(state));
+    } catch (error) {
+        if (!isQuotaExceededError(error)) {
+            throw error;
+        }
+        warnQuotaFallback('Inventory autosave skipped: local storage quota exceeded.');
     }
 }
 

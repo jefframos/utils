@@ -1,7 +1,10 @@
-import { BASE_START_X, BASE_START_Y, CHUNK_SIZE, GAME_RULES, WORLD_HEIGHT, WORLD_WIDTH } from '../config';
+﻿import { BASE_START_X, BASE_START_Y, CHUNK_SIZE, GAME_RULES, WORLD_HEIGHT, WORLD_WIDTH } from '../config';
 import { BIOME_DEFINITIONS } from '../content/biomes';
 import { carveOpen, createHiddenSpaceTile, createSolidTile, damageTile } from '../content/tiles';
-import type { TileDamageHit } from '../core/protocol';
+import { getWorkerDefinition } from '../content/workers';
+import { CommandListComponent, type CommandListState, type EnqueueMode } from '../core/CommandListComponent';
+import { getToolDefinition } from '../core/ToolComponent';
+import type { TileDamageHit } from '../core/protocol.ts';
 import type { Tile, VisibilityState } from '../types';
 import {
     chooseBiomeForPosition,
@@ -10,6 +13,7 @@ import {
     surfaceNoise,
     type SpaceAreaType,
 } from './noise';
+import { ScanNearestBehavior, type ScanNearestPlan } from './behaviors/ScanNearestBehavior';
 import type { WorldViewportRect } from '../camera/GameCamera';
 
 export type SavedTile = {
@@ -20,8 +24,38 @@ export type SavedTile = {
     visibility: VisibilityState;
 };
 
-export type WorldEntityKind = 'base' | 'beacon';
+export type WorldEntityKind = 'base' | 'beacon' | 'worker' | 'player';
 export type WorldEntityMobility = 'static' | 'dynamic';
+export type WorkerUnitType = 'basic-worker';
+
+export type EntityWalkingDefinition = {
+    speedTilesPerSecond: number;
+};
+
+export type EntityBuilderDefinition = {
+    buildRadius: number;
+    buildables: Array<'beacon'>;
+};
+
+export type EntityMiningDefinition = {
+    minePower: number;
+    mineCooldownMs: number;
+    carryCapacity: number;
+};
+
+export type EntityInventoryDefinition = {
+    capacity: number;
+    sharedId?: string;
+};
+
+export type EntitySizeDefinition = {
+    width: number;
+    height: number;
+};
+
+export const ENTITY_SIZES: Record<'beacon', EntitySizeDefinition> = {
+    beacon: { width: 1, height: 1 },
+};
 
 export type WorldEntity = {
     id: string;
@@ -31,7 +65,88 @@ export type WorldEntity = {
     y: number;
     visibilityRadius: number;
     parentId: string | null;
+    unitType?: WorkerUnitType;
+    homeId?: string | null;
+    deployed?: boolean;
+    hp?: number;
+    maxHp?: number;
+    moveSpeedTilesPerSecond?: number;
+    spawnTimeMs?: number;
+    toolId?: string;
+    minePower?: number;
+    mineCooldownMs?: number;
+    carryCapacity?: number;
+    movement?: WorkerMovementState | null;
+    mining?: WorkerMiningState | null;
+    commandList?: WorkerEntityCommandList | PlayerEntityCommandList | null;
+    commandsPaused?: boolean;
+    walking?: EntityWalkingDefinition;
+    builder?: EntityBuilderDefinition;
+    miningDef?: EntityMiningDefinition;
+    inventoryDef?: EntityInventoryDefinition;
 };
+
+export type WorkerMovementState = {
+    path: Array<{ x: number; y: number }>;
+    stepIndex: number;
+    progress: number;
+    mode: 'move' | 'return';
+    homeId?: string | null;
+};
+
+export type WorkerMiningState = {
+    targetX: number;
+    targetY: number;
+    approachX: number;
+    approachY: number;
+    anchorX: number;
+    anchorY: number;
+    homeId: string | null;
+    repeat: boolean;
+    carriedOre: number;
+    miningProgressMs: number;
+    cooldownMs: number;
+    lastMinedX: number;
+    lastMinedY: number;
+};
+
+export type WorkerEntityCommandType = 'move' | 'mine' | 'recall';
+
+export type WorkerEntityCommandPayload = {
+    x?: number;
+    y?: number;
+    repeat?: boolean;
+};
+
+export type WorkerEntityCommandList = CommandListState<WorkerEntityCommandType, WorkerEntityCommandPayload>;
+
+export type PlayerEntityCommandType = 'move' | 'build';
+
+export type PlayerEntityCommandPayload = {
+    x?: number;
+    y?: number;
+    buildableType?: 'beacon';
+};
+
+export type PlayerEntityCommandList = CommandListState<PlayerEntityCommandType, PlayerEntityCommandPayload>;
+
+type WorkerOreDelivery = {
+    workerId: string;
+    homeId: string | null;
+    amount: number;
+};
+
+export type RemoveBeaconResult =
+    | { ok: true; beacon: SavedBeacon }
+    | { ok: false; reason: 'not_found' | 'not_beacon' };
+
+export type WorkerActionResult =
+    | { ok: true; worker: WorldEntity }
+    | { ok: false; reason: 'not_found' | 'not_worker' | 'invalid_building' | 'already_deployed' | 'already_recalled' | 'no_deploy_space' | 'invalid_target' | 'path_blocked' };
+
+export type PlayerActionResult =
+    | { ok: true; player: WorldEntity }
+    | { ok: false; reason: 'not_found' | 'invalid_target' | 'path_blocked' };
 
 export type SavedBeacon = {
     id: string;
@@ -70,8 +185,14 @@ type WorldRules = {
 };
 
 const BASE_ENTITY_ID = 'entity-base';
+const MAIN_PLAYER_ENTITY_ID = 'entity-player-main';
 const BASE_VISIBILITY_RADIUS = 7;
-const BEACON_VISIBILITY_RADIUS = 4;
+const PLAYER_VISIBILITY_RADIUS = 14;
+const PLAYER_MOVE_SPEED_TILES_PER_SECOND = 2.5;
+const PLAYER_BUILD_RADIUS = 12;
+const WORKER_VISIBILITY_RADIUS = 8;
+const BEACON_VISIBILITY_RADIUS = 10;
+const BEACON_BIOME_PENETRATION_DEPTH = 1;
 
 type BeaconNode = SavedBeacon;
 
@@ -87,12 +208,21 @@ export class WorldModel {
     private readonly modifiedTiles = new Set<string>();
     private readonly entities = new Map<string, WorldEntity>();
     private readonly beacons: BeaconNode[] = [];
+    private readonly mineReservations = new Map<string, string>();
+    private readonly pendingWorkerOreDeliveries: WorkerOreDelivery[] = [];
+    private readonly pendingWorkerDamageHits: TileDamageHit[] = [];
+    private readonly scanNearestBehavior = new ScanNearestBehavior({
+        areaRadius: 9,
+        reseedScanRadius: 18,
+        minDenseNeighbors: 2,
+    });
     private readonly rules: WorldRules;
     private transientMineState: { x: number; y: number; time: number } | null = null;
     private transientDamageTiles = new Set<string>();
     private baseXValue = BASE_START_X;
     private baseYValue = BASE_START_Y;
     private nextBeaconIndex = 1;
+    private nextWorkerIndex = 1;
 
     get width(): number {
         return this.widthValue;
@@ -108,6 +238,10 @@ export class WorldModel {
 
     get baseY(): number {
         return this.getBaseEntity()?.y ?? this.baseYValue;
+    }
+
+    getMainPlayerEntityId(): string {
+        return MAIN_PLAYER_ENTITY_ID;
     }
 
     constructor(seed = 1337, rules?: Partial<WorldRules>) {
@@ -131,7 +265,10 @@ export class WorldModel {
         this.modifiedTiles.clear();
         this.entities.clear();
         this.beacons.length = 0;
+        this.mineReservations.clear();
+        this.pendingWorkerOreDeliveries.length = 0;
         this.nextBeaconIndex = 1;
+        this.nextWorkerIndex = 1;
         this.widthValue = WORLD_WIDTH;
         this.heightValue = WORLD_HEIGHT;
         this.generate();
@@ -143,6 +280,49 @@ export class WorldModel {
 
     getEntities(): ReadonlyArray<WorldEntity> {
         return Array.from(this.entities.values());
+    }
+
+    getEntityById(entityId: string): WorldEntity | null {
+        return this.entities.get(entityId) ?? null;
+    }
+
+    canEntityBuildBeaconAt(entityId: string, x: number, y: number): boolean {
+        const reason = this.getBeaconPlacementFailureReason(x, y, entityId);
+        return reason === 'unknown_tile';
+    }
+
+    canEntityBuild(entityId: string): boolean {
+        const entity = this.entities.get(entityId);
+        return !!entity?.builder && entity.builder.buildables.length > 0;
+    }
+
+    getEntityAtTile(x: number, y: number): WorldEntity | null {
+        const player = this.getMainPlayerEntity();
+        if (player && Math.round(player.x) === x && Math.round(player.y) === y) {
+            return player;
+        }
+
+        for (const entity of this.entities.values()) {
+            if (entity.kind === 'worker' && entity.deployed === true && Math.round(entity.x) === x && Math.round(entity.y) === y) {
+                return entity;
+            }
+            if (entity.kind === 'beacon' && entity.x === x && entity.y === y) {
+                return entity;
+            }
+        }
+
+        const base = this.getBaseEntity();
+        if (base && Math.abs(base.x - x) <= 2 && Math.abs(base.y - y) <= 2) {
+            return base;
+        }
+
+        return null;
+    }
+
+    getWorkersForBuilding(buildingId: string): ReadonlyArray<WorldEntity> {
+        return Array.from(this.entities.values())
+            .filter((entity) => entity.kind === 'worker' && entity.homeId === buildingId)
+            .sort((left, right) => left.id.localeCompare(right.id));
     }
 
     toSnapshot(): WorldSnapshot {
@@ -215,7 +395,61 @@ export class WorldModel {
             }
         } else if (snapshot.version === 3 && Array.isArray(snapshot.entities)) {
             for (const entity of snapshot.entities) {
-                this.entities.set(entity.id, { ...entity });
+                const normalizedEntity: WorldEntity = { ...entity };
+                if (normalizedEntity.kind === 'beacon') {
+                    normalizedEntity.visibilityRadius = BEACON_VISIBILITY_RADIUS;
+                } else if (normalizedEntity.kind === 'player') {
+                    normalizedEntity.visibilityRadius = PLAYER_VISIBILITY_RADIUS;
+                    normalizedEntity.mobility = 'dynamic';
+                    normalizedEntity.parentId = null;
+                    normalizedEntity.moveSpeedTilesPerSecond = normalizedEntity.moveSpeedTilesPerSecond ?? PLAYER_MOVE_SPEED_TILES_PER_SECOND;
+                    normalizedEntity.walking = normalizedEntity.walking ?? {
+                        speedTilesPerSecond: normalizedEntity.moveSpeedTilesPerSecond,
+                    };
+                    normalizedEntity.builder = normalizedEntity.builder ?? {
+                        buildRadius: PLAYER_BUILD_RADIUS,
+                        buildables: ['beacon'],
+                    };
+                    normalizedEntity.inventoryDef = normalizedEntity.inventoryDef ?? {
+                        capacity: 999,
+                        sharedId: 'main-player',
+                    };
+                    normalizedEntity.miningDef = normalizedEntity.miningDef ?? {
+                        minePower: 1,
+                        mineCooldownMs: 160,
+                        carryCapacity: 999,
+                    };
+                } else if (normalizedEntity.kind === 'worker') {
+                    const definition = getWorkerDefinition(normalizedEntity.unitType ?? 'basic-worker');
+                    normalizedEntity.visibilityRadius = definition.visibilityRadius;
+                    normalizedEntity.hp = normalizedEntity.hp ?? definition.maxHp;
+                    normalizedEntity.maxHp = normalizedEntity.maxHp ?? definition.maxHp;
+                    normalizedEntity.moveSpeedTilesPerSecond = normalizedEntity.moveSpeedTilesPerSecond ?? definition.moveSpeedTilesPerSecond;
+                    normalizedEntity.spawnTimeMs = normalizedEntity.spawnTimeMs ?? definition.spawnTimeMs;
+                    normalizedEntity.toolId = normalizedEntity.toolId ?? definition.toolId;
+                    normalizedEntity.minePower = normalizedEntity.minePower ?? definition.minePower;
+                    normalizedEntity.mineCooldownMs = normalizedEntity.mineCooldownMs ?? definition.mineCooldownMs;
+                    normalizedEntity.carryCapacity = normalizedEntity.carryCapacity ?? definition.carryCapacity;
+                    normalizedEntity.mining = normalizedEntity.mining ?? null;
+                    normalizedEntity.walking = normalizedEntity.walking ?? {
+                        speedTilesPerSecond: normalizedEntity.moveSpeedTilesPerSecond,
+                    };
+                    normalizedEntity.miningDef = normalizedEntity.miningDef ?? {
+                        minePower: normalizedEntity.minePower,
+                        mineCooldownMs: normalizedEntity.mineCooldownMs,
+                        carryCapacity: normalizedEntity.carryCapacity,
+                    };
+                    const commandListComponent = new CommandListComponent<WorkerEntityCommandType, WorkerEntityCommandPayload>(normalizedEntity.commandList as WorkerEntityCommandList ?? undefined);
+                    normalizedEntity.commandList = commandListComponent.snapshot();
+                    if (normalizedEntity.mining) {
+                        normalizedEntity.mining.anchorX = normalizedEntity.mining.anchorX ?? normalizedEntity.mining.targetX;
+                        normalizedEntity.mining.anchorY = normalizedEntity.mining.anchorY ?? normalizedEntity.mining.targetY;
+                        normalizedEntity.mining.lastMinedX = normalizedEntity.mining.lastMinedX ?? normalizedEntity.mining.targetX;
+                        normalizedEntity.mining.lastMinedY = normalizedEntity.mining.lastMinedY ?? normalizedEntity.mining.targetY;
+                    }
+                }
+
+                this.entities.set(normalizedEntity.id, normalizedEntity);
                 if (entity.kind === 'beacon') {
                     const beaconId = entity.id.startsWith('entity-') ? entity.id.slice('entity-'.length) : entity.id;
                     this.beacons.push({ id: beaconId, x: entity.x, y: entity.y, parentId: entity.parentId && entity.parentId !== BASE_ENTITY_ID ? entity.parentId.replace(/^entity-/, '') : null });
@@ -226,58 +460,100 @@ export class WorldModel {
                         }
                     }
                 }
+                if (entity.kind === 'worker' && entity.id.startsWith('entity-worker-')) {
+                    const suffix = Number.parseInt(entity.id.slice('entity-worker-'.length), 10);
+                    if (Number.isFinite(suffix)) {
+                        this.nextWorkerIndex = Math.max(this.nextWorkerIndex, suffix + 1);
+                    }
+                }
             }
             this.syncBaseFromEntity();
         }
 
         this.ensureBaseEntity();
+        this.ensureMainPlayerEntity();
         this.rebuildBeaconLighting();
         this.applyEntityVisibility();
+        this.rebuildMineReservationsFromEntities();
         this.markAllDirty();
     }
 
-    getBeaconPlacementFailureReason(x: number, y: number): 'too_far' | 'not_open' | 'already_exists' | 'unknown_tile' {
+    drainWorkerOreDeliveries(): WorkerOreDelivery[] {
+        const deliveries = this.pendingWorkerOreDeliveries.splice(0, this.pendingWorkerOreDeliveries.length);
+        return deliveries;
+    }
+
+    drainWorkerDamageHits(): TileDamageHit[] {
+        return this.pendingWorkerDamageHits.splice(0, this.pendingWorkerDamageHits.length);
+    }
+
+    getBeaconPlacementFailureReason(x: number, y: number, builderEntityId?: string): 'too_far' | 'not_open' | 'already_exists' | 'unknown_tile' | 'not_builder' {
         const tile = this.getTile(x, y);
         if (!tile) return 'unknown_tile';
-        // Allow placement on open tiles or mineable frontier solids (breakable tiles)
-        if (tile.solid && !this.isMineableFrontierSolid(x, y)) return 'not_open';
         if (tile.visibility === 'Unknown') return 'not_open';
         if (this.beacons.some((entry) => entry.x === x && entry.y === y)) return 'already_exists';
 
-        const MAX_LINK_DISTANCE = 56;
-        const parent = this.findNearestBeacon(x, y);
-        const source = parent
-            ? { x: parent.x, y: parent.y }
-            : { x: this.baseX, y: this.baseY };
-        const distance = Math.hypot(x - source.x, y - source.y);
-        if (distance > MAX_LINK_DISTANCE) return 'too_far';
+        const builder = this.resolveBuilderEntity(builderEntityId);
+        if (!builder || !builder.builder || !builder.builder.buildables.includes('beacon')) {
+            return 'not_builder';
+        }
+
+        const distance = Math.hypot(x - builder.x, y - builder.y);
+        if (distance > builder.builder.buildRadius) return 'too_far';
 
         return 'unknown_tile';
     }
 
-    placeBeacon(x: number, y: number): SavedBeacon | null {
+    /**
+     * Get all valid buildable tiles for a builder entity (within build radius and visible).
+     */
+    getBuildableTilesForEntity(entityId: string, buildableType: 'beacon'): Array<{ x: number; y: number }> {
+        const builder = this.entities.get(entityId);
+        if (!builder || !builder.builder) return [];
+
+        const buildRadius = builder.builder.buildRadius;
+        const tiles: Array<{ x: number; y: number }> = [];
+
+        for (let dx = -buildRadius; dx <= buildRadius; dx++) {
+            for (let dy = -buildRadius; dy <= buildRadius; dy++) {
+                const x = builder.x + dx;
+                const y = builder.y + dy;
+                const distance = Math.hypot(dx, dy);
+                if (distance > buildRadius) continue;
+
+                const tile = this.getTile(x, y);
+                if (!tile) continue;
+                if (tile.visibility === 'Unknown') continue;
+                if (buildableType === 'beacon' && this.beacons.some((entry) => entry.x === x && entry.y === y)) continue;
+
+                tiles.push({ x, y });
+            }
+        }
+
+        return tiles;
+    }
+
+    placeBeacon(x: number, y: number, builderEntityId?: string): SavedBeacon | null {
         this.ensureWorldContainsTile(x, y);
         const tile = this.getTile(x, y);
-        // Allow placement on open tiles or mineable frontier solids (breakable tiles)
-        if (!tile || (tile.solid && !this.isMineableFrontierSolid(x, y))) return null;
+        if (!tile) return null;
         if (tile.visibility === 'Unknown') return null;
         if (this.beacons.some((entry) => entry.x === x && entry.y === y)) return null;
 
-        const MAX_LINK_DISTANCE = 56;
+        const builder = this.resolveBuilderEntity(builderEntityId);
+        if (!builder || !builder.builder || !builder.builder.buildables.includes('beacon')) return null;
+
+        const buildDistance = Math.hypot(x - builder.x, y - builder.y);
+        if (buildDistance > builder.builder.buildRadius) return null;
+
         const parent = this.findNearestBeacon(x, y);
+        const maxLinkDistance = Math.max(16, Math.ceil(builder.builder.buildRadius * 2));
         const source = parent
             ? { id: parent.id, x: parent.x, y: parent.y }
-            : { id: null as string | null, x: this.baseX, y: this.baseY };
+            : { id: null as string | null, x: builder.x, y: builder.y };
 
-        const distance = Math.hypot(x - source.x, y - source.y);
-        if (distance > MAX_LINK_DISTANCE) return null;
-
-        // For open tiles, require a path; for breakable tiles, skip path requirement
-        let path: Array<{ x: number; y: number }> | null = null;
-        if (!tile.solid) {
-            path = this.findOpenPath(source.x, source.y, x, y, MAX_LINK_DISTANCE * 6);
-            if (!path) return null;
-        }
+        const path = this.findBeaconLinkPath(source.x, source.y, x, y, maxLinkDistance * 6);
+        if (!path) return null;
 
         const beaconId = `beacon-${this.nextBeaconIndex++}`;
         const beaconEntityId = `entity-${beaconId}`;
@@ -299,12 +575,769 @@ export class WorldModel {
             parentId: parentEntityId,
         });
 
-        if (path) {
-            this.applyBeaconPathLighting(path);
-        }
+        this.applyBeaconPathLighting(path);
         this.applyEntityVisibility();
         this.markModifiedAt(x, y);
         return { ...beacon };
+    }
+
+    removeBeaconByEntityId(entityId: string): RemoveBeaconResult {
+        const entity = this.entities.get(entityId);
+        if (!entity) {
+            return { ok: false, reason: 'not_found' };
+        }
+        if (entity.kind !== 'beacon') {
+            return { ok: false, reason: 'not_beacon' };
+        }
+
+        const beaconId = entityId.startsWith('entity-') ? entityId.slice('entity-'.length) : entityId;
+        const beaconIndex = this.beacons.findIndex((entry) => entry.id === beaconId);
+        if (beaconIndex < 0) {
+            this.entities.delete(entityId);
+            this.markChunkDirtyAt(entity.x, entity.y);
+            return { ok: false, reason: 'not_found' };
+        }
+
+        const removedBeacon = this.beacons[beaconIndex];
+        this.beacons.splice(beaconIndex, 1);
+        this.entities.delete(entityId);
+
+        for (const beacon of this.beacons) {
+            if (beacon.parentId === removedBeacon.id) {
+                beacon.parentId = removedBeacon.parentId;
+            }
+        }
+
+        for (const entry of this.entities.values()) {
+            if (entry.kind !== 'beacon') continue;
+            if (entry.parentId !== entityId) continue;
+            entry.parentId = removedBeacon.parentId ? `entity-${removedBeacon.parentId}` : BASE_ENTITY_ID;
+        }
+
+        this.markModifiedAt(removedBeacon.x, removedBeacon.y);
+        this.markChunkDirtyAt(removedBeacon.x, removedBeacon.y);
+        this.recalculateVisibilityFromCurrentState();
+
+        return { ok: true, beacon: { ...removedBeacon } };
+    }
+
+    spawnWorkerAtBuilding(buildingId: string): WorkerActionResult {
+        const building = this.entities.get(buildingId);
+        if (!building) {
+            return { ok: false, reason: 'not_found' };
+        }
+        if (building.kind !== 'base') {
+            return { ok: false, reason: 'invalid_building' };
+        }
+
+        const definition = getWorkerDefinition('basic-worker');
+        const workerId = `entity-worker-${this.nextWorkerIndex++}`;
+        const worker: WorldEntity = {
+            id: workerId,
+            kind: 'worker',
+            mobility: 'dynamic',
+            x: building.x,
+            y: building.y,
+            visibilityRadius: definition.visibilityRadius,
+            parentId: buildingId,
+            unitType: 'basic-worker',
+            homeId: buildingId,
+            deployed: false,
+            hp: definition.maxHp,
+            maxHp: definition.maxHp,
+            moveSpeedTilesPerSecond: definition.moveSpeedTilesPerSecond,
+            spawnTimeMs: definition.spawnTimeMs,
+            toolId: definition.toolId,
+            minePower: definition.minePower,
+            mineCooldownMs: definition.mineCooldownMs,
+            carryCapacity: definition.carryCapacity,
+            walking: {
+                speedTilesPerSecond: definition.moveSpeedTilesPerSecond,
+            },
+            miningDef: {
+                minePower: definition.minePower,
+                mineCooldownMs: definition.mineCooldownMs,
+                carryCapacity: definition.carryCapacity,
+            },
+            commandList: CommandListComponent.createEmpty<WorkerEntityCommandType, WorkerEntityCommandPayload>(),
+        };
+
+        this.entities.set(workerId, worker);
+        this.markChunkDirtyAt(building.x, building.y);
+        return { ok: true, worker: { ...worker } };
+    }
+
+    deployWorker(workerId: string): WorkerActionResult {
+        const worker = this.entities.get(workerId);
+        if (!worker) {
+            return { ok: false, reason: 'not_found' };
+        }
+        if (worker.kind !== 'worker') {
+            return { ok: false, reason: 'not_worker' };
+        }
+        if (worker.deployed) {
+            return { ok: false, reason: 'already_deployed' };
+        }
+
+        const home = worker.homeId ? this.entities.get(worker.homeId) : null;
+        if (!home) {
+            return { ok: false, reason: 'invalid_building' };
+        }
+
+        const tile = this.findDeploymentTile(home);
+        if (!tile) {
+            return { ok: false, reason: 'no_deploy_space' };
+        }
+
+        const previousX = worker.x;
+        const previousY = worker.y;
+        worker.x = tile.x;
+        worker.y = tile.y;
+        worker.deployed = true;
+        worker.parentId = null;
+        worker.movement = null;
+        worker.mining = null;
+        this.markChunkDirtyAt(previousX, previousY);
+        this.markChunkDirtyAt(tile.x, tile.y);
+        this.applyWorkerVisibility(worker);
+        return { ok: true, worker: { ...worker } };
+    }
+
+    recallWorker(workerId: string): WorkerActionResult {
+        return this.enqueueWorkerCommand(workerId, { type: 'recall' }, 'append');
+    }
+
+    recallWorkersForBuilding(buildingId: string): { ok: true; count: number } | { ok: false; reason: 'not_found' | 'invalid_building' } {
+        const building = this.entities.get(buildingId);
+        if (!building) {
+            return { ok: false, reason: 'not_found' };
+        }
+        if (building.kind !== 'base') {
+            return { ok: false, reason: 'invalid_building' };
+        }
+
+        let count = 0;
+        for (const entity of this.entities.values()) {
+            if (entity.kind !== 'worker') continue;
+            if (entity.homeId !== buildingId) continue;
+            if (!entity.deployed) continue;
+            this.clearWorkerCommands(entity.id);
+            this.clearWorkerMining(entity);
+            const returnTarget = this.findNearestDropoffTile(building, entity.x, entity.y);
+            if (!returnTarget) continue;
+
+            const path = this.findOpenPath(entity.x, entity.y, returnTarget.x, returnTarget.y, 15000);
+            if (!path) continue;
+
+            if (path.length <= 1) {
+                this.markChunkDirtyAt(entity.x, entity.y);
+                entity.x = building.x;
+                entity.y = building.y;
+                entity.deployed = false;
+                entity.parentId = buildingId;
+                entity.movement = null;
+                count++;
+                continue;
+            }
+
+            entity.movement = {
+                path,
+                stepIndex: 1,
+                progress: 0,
+                mode: 'return',
+                homeId: buildingId,
+            };
+            this.markChunkDirtyAt(entity.x, entity.y);
+            count++;
+        }
+
+        if (count > 0) {
+            this.markChunkDirtyAt(building.x, building.y);
+        }
+        return { ok: true, count };
+    }
+
+    canWorkerMineTile(workerId: string, x: number, y: number): boolean {
+        const worker = this.entities.get(workerId);
+        if (!worker || worker.kind !== 'worker') return false;
+        return this.canWorkerMineTileForWorker(worker, x, y) && this.findMineApproachPath(worker, x, y) !== null;
+    }
+
+    startWorkerMining(workerId: string, x: number, y: number, repeat = true): WorkerActionResult {
+        return this.enqueueWorkerCommand(workerId, { type: 'mine', x, y, repeat }, 'append');
+    }
+
+    moveWorkerTo(workerId: string, x: number, y: number): WorkerActionResult {
+        return this.enqueueWorkerCommand(workerId, { type: 'move', x, y }, 'append');
+    }
+
+    moveMainPlayerTo(x: number, y: number): PlayerActionResult {
+        const player = this.getMainPlayerEntity();
+        if (!player) {
+            return { ok: false, reason: 'not_found' };
+        }
+
+        this.ensureWorldContainsTile(x, y);
+        const tile = this.getTile(x, y);
+        if (!tile || tile.solid || tile.visibility === 'Unknown') {
+            return { ok: false, reason: 'invalid_target' };
+        }
+        if (this.isEntityOccupied(x, y, player.id)) {
+            return { ok: false, reason: 'invalid_target' };
+        }
+
+        const commandList = this.getPlayerCommandList(player);
+        commandList.enqueue('move', { x, y }, 'append');
+        this.setPlayerCommandList(player, commandList);
+        this.tryStartNextPlayerCommand(player);
+        this.markChunkDirtyAt(player.x, player.y);
+        return { ok: true, player: { ...player } };
+    }
+
+    removeQueuedPlayerCommand(commandId: string): { ok: true } | { ok: false; reason: 'not_found' } {
+        const player = this.getMainPlayerEntity();
+        if (!player) return { ok: false, reason: 'not_found' };
+
+        const commandList = this.getPlayerCommandList(player);
+        const removed = commandList.removeQueued(commandId);
+        if (!removed) return { ok: false, reason: 'not_found' };
+        this.setPlayerCommandList(player, commandList);
+        this.markChunkDirtyAt(player.x, player.y);
+        return { ok: true };
+    }
+
+    interruptPlayerCommand(): PlayerActionResult {
+        const player = this.getMainPlayerEntity();
+        if (!player) return { ok: false, reason: 'not_found' };
+        player.movement = null;
+        this.completeCurrentPlayerCommand(player);
+        player.commandsPaused = false;
+        this.tryStartNextPlayerCommand(player);
+        this.markChunkDirtyAt(player.x, player.y);
+        return { ok: true, player: { ...player } };
+    }
+
+    clearPlayerCommands(): PlayerActionResult {
+        const player = this.getMainPlayerEntity();
+        if (!player) return { ok: false, reason: 'not_found' };
+        player.movement = null;
+        player.commandsPaused = false;
+        const commandList = this.getPlayerCommandList(player);
+        commandList.clearAll();
+        this.setPlayerCommandList(player, commandList);
+        this.markChunkDirtyAt(player.x, player.y);
+        return { ok: true, player: { ...player } };
+    }
+
+    pausePlayerCommands(): PlayerActionResult {
+        const player = this.getMainPlayerEntity();
+        if (!player) return { ok: false, reason: 'not_found' };
+        player.commandsPaused = true;
+        this.markChunkDirtyAt(player.x, player.y);
+        return { ok: true, player: { ...player } };
+    }
+
+    resumePlayerCommands(): PlayerActionResult {
+        const player = this.getMainPlayerEntity();
+        if (!player) return { ok: false, reason: 'not_found' };
+        player.commandsPaused = false;
+        this.tryStartNextPlayerCommand(player);
+        this.markChunkDirtyAt(player.x, player.y);
+        return { ok: true, player: { ...player } };
+    }
+
+    pauseWorkerCommands(workerId: string): WorkerActionResult {
+        const worker = this.entities.get(workerId);
+        if (!worker) return { ok: false, reason: 'not_found' };
+        if (worker.kind !== 'worker') return { ok: false, reason: 'not_worker' };
+        worker.commandsPaused = true;
+        this.markChunkDirtyAt(worker.x, worker.y);
+        return { ok: true, worker: { ...worker } };
+    }
+
+
+    resumeWorkerCommands(workerId: string): WorkerActionResult {
+        const worker = this.entities.get(workerId);
+        if (!worker) return { ok: false, reason: 'not_found' };
+        if (worker.kind !== 'worker') return { ok: false, reason: 'not_worker' };
+        worker.commandsPaused = false;
+        this.tryStartNextWorkerCommand(worker);
+        this.markChunkDirtyAt(worker.x, worker.y);
+        return { ok: true, worker: { ...worker } };
+    }
+
+    enqueueWorkerCommand(workerId: string, command: { type: WorkerEntityCommandType; x?: number; y?: number; repeat?: boolean }, mode: EnqueueMode = 'append'): WorkerActionResult {
+        const worker = this.entities.get(workerId);
+        if (!worker) return { ok: false, reason: 'not_found' };
+        if (worker.kind !== 'worker') return { ok: false, reason: 'not_worker' };
+        if (command.type === 'move' || command.type === 'mine') {
+            if (!worker.deployed) return { ok: false, reason: 'already_recalled' };
+            if (!Number.isFinite(command.x) || !Number.isFinite(command.y)) return { ok: false, reason: 'invalid_target' };
+        }
+        const commandList = this.getWorkerCommandList(worker);
+        if (mode === 'replace') {
+            commandList.interruptCurrent();
+            commandList.clearAll();
+            this.clearWorkerMining(worker);
+            this.clearWorkerMovement(worker);
+        }
+        commandList.enqueue(command.type, { x: command.x, y: command.y, repeat: command.repeat }, 'append');
+        this.setWorkerCommandList(worker, commandList);
+        if (worker.commandsPaused) worker.commandsPaused = false;
+        this.tryStartNextWorkerCommand(worker);
+        this.markChunkDirtyAt(worker.x, worker.y);
+        return { ok: true, worker: { ...worker } };
+    }
+
+    interruptWorkerCommand(workerId: string): WorkerActionResult {
+        const worker = this.entities.get(workerId);
+        if (!worker) return { ok: false, reason: 'not_found' };
+        if (worker.kind !== 'worker') return { ok: false, reason: 'not_worker' };
+        const commandList = this.getWorkerCommandList(worker);
+        if (!commandList.snapshot().current && !worker.mining && !worker.movement) return { ok: false, reason: 'already_recalled' };
+        commandList.interruptCurrent();
+        this.setWorkerCommandList(worker, commandList);
+        this.clearWorkerMining(worker);
+        this.clearWorkerMovement(worker);
+        worker.commandsPaused = false;
+        this.tryStartNextWorkerCommand(worker);
+        this.markChunkDirtyAt(worker.x, worker.y);
+        return { ok: true, worker: { ...worker } };
+    }
+
+    clearWorkerCommands(workerId: string): WorkerActionResult {
+        const worker = this.entities.get(workerId);
+        if (!worker) return { ok: false, reason: 'not_found' };
+        if (worker.kind !== 'worker') return { ok: false, reason: 'not_worker' };
+        const commandList = this.getWorkerCommandList(worker);
+        commandList.clearAll();
+        this.setWorkerCommandList(worker, commandList);
+        this.clearWorkerMining(worker);
+        this.clearWorkerMovement(worker);
+        this.markChunkDirtyAt(worker.x, worker.y);
+        return { ok: true, worker: { ...worker } };
+    }
+
+    removeQueuedWorkerCommand(workerId: string, commandId: string): WorkerActionResult {
+        const worker = this.entities.get(workerId);
+        if (!worker) return { ok: false, reason: 'not_found' };
+        if (worker.kind !== 'worker') return { ok: false, reason: 'not_worker' };
+        const commandList = this.getWorkerCommandList(worker);
+        const removed = commandList.removeQueued(commandId);
+        if (!removed) return { ok: false, reason: 'invalid_target' };
+        this.setWorkerCommandList(worker, commandList);
+        this.markChunkDirtyAt(worker.x, worker.y);
+        return { ok: true, worker: { ...worker } };
+    }
+
+    private beginMoveWorkerTo(worker: WorldEntity, x: number, y: number): WorkerActionResult {
+        this.clearWorkerMining(worker);
+
+        this.ensureWorldContainsTile(x, y);
+        const targetTile = this.getTile(x, y);
+        if (!targetTile || targetTile.solid || targetTile.visibility === 'Unknown') {
+            return { ok: false, reason: 'invalid_target' };
+        }
+        if (this.isEntityOccupied(x, y, worker.id)) {
+            return { ok: false, reason: 'invalid_target' };
+        }
+
+        const path = this.findOpenPath(worker.x, worker.y, x, y, 15000);
+        if (!path) {
+            return { ok: false, reason: 'path_blocked' };
+        }
+
+        if (path.length <= 1) {
+            worker.movement = null;
+            this.markChunkDirtyAt(worker.x, worker.y);
+            return { ok: true, worker: { ...worker } };
+        }
+
+        worker.movement = {
+            path,
+            stepIndex: 1,
+            progress: 0,
+            mode: 'move',
+        };
+        this.markChunkDirtyAt(worker.x, worker.y);
+        return { ok: true, worker: { ...worker } };
+    }
+
+    private beginWorkerMining(worker: WorldEntity, x: number, y: number, repeat = true): WorkerActionResult {
+        let targetX = x;
+        let targetY = y;
+        let approachX: number;
+        let approachY: number;
+        let path: Array<{ x: number; y: number }>;
+        let anchorX = x;
+        let anchorY = y;
+
+        const directMineable = this.canWorkerMineTileForWorker(worker, x, y);
+        const directPlan = directMineable ? this.findMineApproachPath(worker, x, y) : null;
+
+        if (directPlan) {
+            approachX = directPlan.approachX;
+            approachY = directPlan.approachY;
+            path = directPlan.path;
+        } else {
+            const fallback = this.findClosestMineTargetPlan(worker, {
+                anchorX: x,
+                anchorY: y,
+                lastMinedX: x,
+                lastMinedY: y,
+            });
+            if (!fallback) {
+                return { ok: false, reason: directMineable ? 'path_blocked' : 'invalid_target' };
+            }
+            targetX = fallback.targetX;
+            targetY = fallback.targetY;
+            approachX = fallback.approachX;
+            approachY = fallback.approachY;
+            path = fallback.path;
+            anchorX = fallback.anchorX;
+            anchorY = fallback.anchorY;
+        }
+
+        this.clearWorkerMining(worker);
+        this.clearWorkerMovement(worker);
+        if (!this.reserveMineTarget(targetX, targetY, worker.id)) {
+            return { ok: false, reason: 'invalid_target' };
+        }
+        worker.deployed = true;
+        worker.parentId = null;
+        worker.mining = {
+            targetX,
+            targetY,
+            approachX,
+            approachY,
+            anchorX,
+            anchorY,
+            homeId: worker.homeId ?? null,
+            repeat,
+            carriedOre: 0,
+            miningProgressMs: 0,
+            cooldownMs: 0,
+            lastMinedX: targetX,
+            lastMinedY: targetY,
+        };
+        worker.movement = {
+            path,
+            stepIndex: 1,
+            progress: 0,
+            mode: 'move',
+        };
+        this.markChunkDirtyAt(worker.x, worker.y);
+        return { ok: true, worker: { ...worker } };
+    }
+
+    private beginRecallWorker(worker: WorldEntity): WorkerActionResult {
+        if (!worker.deployed || worker.movement?.mode === 'return') {
+            return { ok: false, reason: 'already_recalled' };
+        }
+
+        this.clearWorkerMining(worker);
+
+        const home = worker.homeId ? this.entities.get(worker.homeId) : null;
+        if (!home) {
+            return { ok: false, reason: 'invalid_building' };
+        }
+
+        const returnTarget = this.findNearestDropoffTile(home, worker.x, worker.y);
+        if (!returnTarget) {
+            return { ok: false, reason: 'no_deploy_space' };
+        }
+
+        const path = this.findOpenPath(worker.x, worker.y, returnTarget.x, returnTarget.y, 15000);
+        if (!path) {
+            return { ok: false, reason: 'path_blocked' };
+        }
+
+        if (path.length <= 1) {
+            worker.deployed = false;
+            worker.parentId = home.id;
+            worker.movement = null;
+            this.markChunkDirtyAt(returnTarget.x, returnTarget.y);
+            return { ok: true, worker: { ...worker } };
+        }
+
+        worker.movement = {
+            path,
+            stepIndex: 1,
+            progress: 0,
+            mode: 'return',
+            homeId: home.id,
+        };
+        this.markChunkDirtyAt(worker.x, worker.y);
+        return { ok: true, worker: { ...worker } };
+    }
+
+    tickFixed(deltaMs: number): void {
+        if (deltaMs <= 0) return;
+
+        const movedWorkers: WorldEntity[] = [];
+        for (const entity of this.entities.values()) {
+            if (entity.kind !== 'worker') continue;
+            const previousX = entity.x;
+            const previousY = entity.y;
+
+            this.tryStartNextWorkerCommand(entity);
+
+            if (!entity.commandsPaused && entity.movement) {
+                const speed = Math.max(0.1, entity.walking?.speedTilesPerSecond ?? entity.moveSpeedTilesPerSecond ?? getWorkerDefinition(entity.unitType ?? 'basic-worker').moveSpeedTilesPerSecond);
+                let remainingTiles = (speed * deltaMs) / 1000;
+
+                while (remainingTiles > 0 && entity.movement.stepIndex < entity.movement.path.length) {
+                    const nextPoint = entity.movement.path[entity.movement.stepIndex];
+                    const distance = Math.hypot(nextPoint.x - entity.x, nextPoint.y - entity.y);
+                    if (distance === 0) {
+                        entity.x = nextPoint.x;
+                        entity.y = nextPoint.y;
+                        entity.movement.stepIndex++;
+                        entity.movement.progress = 0;
+                        continue;
+                    }
+
+                    const step = Math.min(remainingTiles, distance);
+                    const ratio = step / distance;
+                    entity.x += (nextPoint.x - entity.x) * ratio;
+                    entity.y += (nextPoint.y - entity.y) * ratio;
+                    entity.movement.progress += step;
+                    remainingTiles -= step;
+
+                    if (Math.hypot(nextPoint.x - entity.x, nextPoint.y - entity.y) <= 0.001) {
+                        entity.x = nextPoint.x;
+                        entity.y = nextPoint.y;
+                        entity.movement.stepIndex++;
+                        entity.movement.progress = 0;
+                    }
+
+                    if (entity.movement.mode === 'return' && entity.movement.homeId) {
+                        const home = this.entities.get(entity.movement.homeId);
+                        if (home && this.isInBaseDropoffZone(home, entity.x, entity.y)) {
+                            entity.movement.stepIndex = entity.movement.path.length;
+                            break;
+                        }
+                    }
+                }
+
+                if (entity.movement.stepIndex >= entity.movement.path.length) {
+                    const movementMode = entity.movement.mode;
+                    const homeId = entity.movement.homeId ?? entity.homeId ?? null;
+                    entity.movement = null;
+
+                    if (movementMode === 'return' && homeId) {
+                        const home = this.entities.get(homeId);
+                        if (home) {
+                            if (entity.mining?.carriedOre && entity.mining.carriedOre > 0) {
+                                this.pendingWorkerOreDeliveries.push({
+                                    workerId: entity.id,
+                                    homeId,
+                                    amount: entity.mining.carriedOre,
+                                });
+                                entity.mining.carriedOre = 0;
+                            }
+
+                            if (entity.mining) {
+                                const repeatMining = entity.mining.repeat;
+                                const repeatAnchorX = entity.mining.anchorX;
+                                const repeatAnchorY = entity.mining.anchorY;
+                                this.clearWorkerMining(entity);
+                                entity.deployed = true;
+                                entity.parentId = null;
+                                this.completeCurrentWorkerCommand(entity);
+
+                                if (repeatMining) {
+                                    // Only re-enqueue the cycle if the queue is empty.
+                                    // If other commands were added while this cycle was running,
+                                    // they take over as the new active cycle instead of reverting.
+                                    const commandList = this.getWorkerCommandList(entity);
+                                    if (commandList.snapshot().queue.length === 0) {
+                                        commandList.enqueue('mine', { x: repeatAnchorX, y: repeatAnchorY, repeat: true }, 'append');
+                                        this.setWorkerCommandList(entity, commandList);
+                                    }
+                                }
+
+                                this.tryStartNextWorkerCommand(entity);
+                            } else {
+                                entity.deployed = false;
+                                entity.parentId = home.id;
+                                this.completeCurrentWorkerCommand(entity);
+                                this.tryStartNextWorkerCommand(entity);
+                            }
+                        }
+                    } else if (movementMode === 'move') {
+                        if (entity.mining) {
+                            // Approach movement completed normally â€” mining tick will handle it.
+                        } else {
+                            // Check if the current command is 'mine'. This can happen after a save/reload
+                            // where the snapshot was taken during an approach movement before mining
+                            // state was set. Re-activate mining from the current position so the command
+                            // isn't incorrectly discarded.
+                            const cmdList = this.getWorkerCommandList(entity);
+                            const currentCmd = cmdList.snapshot().current;
+                            if (currentCmd?.type === 'mine' && Number.isFinite(currentCmd.payload.x) && Number.isFinite(currentCmd.payload.y)) {
+                                const result = this.beginWorkerMining(entity, Number(currentCmd.payload.x), Number(currentCmd.payload.y), currentCmd.payload.repeat !== false);
+                                if (!result.ok) {
+                                    // Target gone â€” give up and advance queue.
+                                    this.completeCurrentWorkerCommand(entity);
+                                    this.tryStartNextWorkerCommand(entity);
+                                }
+                                // beginWorkerMining sets entity.mining â€” next tick the mining loop takes over.
+                            } else {
+                                this.completeCurrentWorkerCommand(entity);
+                                this.tryStartNextWorkerCommand(entity);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!entity.commandsPaused && entity.mining) {
+                if (entity.deployed && !entity.movement) {
+                    const mining = entity.mining;
+                    const atApproach = Math.round(entity.x) === mining.approachX && Math.round(entity.y) === mining.approachY;
+                    const targetStillMineable = this.isMineableFrontierSolid(mining.targetX, mining.targetY);
+
+                    if (!targetStillMineable || !atApproach) {
+                        const plan = this.findClosestMineTargetPlan(entity, {
+                            anchorX: mining.anchorX,
+                            anchorY: mining.anchorY,
+                            lastMinedX: mining.lastMinedX,
+                            lastMinedY: mining.lastMinedY,
+                        });
+
+                        if (!plan) {
+                            this.clearWorkerMining(entity);
+                            this.completeCurrentWorkerCommand(entity);
+                            this.tryStartNextWorkerCommand(entity);
+                        } else if (this.reserveMineTarget(plan.targetX, plan.targetY, entity.id)) {
+                            mining.targetX = plan.targetX;
+                            mining.targetY = plan.targetY;
+                            mining.approachX = plan.approachX;
+                            mining.approachY = plan.approachY;
+                            mining.anchorX = plan.anchorX;
+                            mining.anchorY = plan.anchorY;
+                            mining.cooldownMs = 0;
+                            mining.miningProgressMs = 0;
+                            entity.movement = {
+                                path: plan.path,
+                                stepIndex: 1,
+                                progress: 0,
+                                mode: 'move',
+                            };
+                        }
+                    } else {
+                        const tool = entity.toolId ? getToolDefinition(entity.toolId) : undefined;
+                        if (!tool) {
+                            this.clearWorkerMining(entity);
+                            this.completeCurrentWorkerCommand(entity);
+                            this.tryStartNextWorkerCommand(entity);
+                        } else if (entity.mining.cooldownMs > 0) {
+                            entity.mining.cooldownMs = Math.max(0, entity.mining.cooldownMs - deltaMs);
+                        } else {
+                            const damage = Math.max(1, Math.floor(tool.tileDamage * Math.max(1, entity.minePower ?? 1)));
+                            const hit = this.mineSingleAt(entity.mining.targetX, entity.mining.targetY, damage);
+                            if (!hit) {
+                                this.releaseMineTarget(entity.mining.targetX, entity.mining.targetY, entity.id);
+                                this.clearWorkerMining(entity);
+                                this.completeCurrentWorkerCommand(entity);
+                                this.tryStartNextWorkerCommand(entity);
+                            } else {
+                                this.pendingWorkerDamageHits.push(hit);
+                                const toolCadenceMs = Math.max(60, Math.round(1000 / Math.max(0.1, tool.hitsPerSecond)));
+                                const workerCadenceMs = Math.max(0, Math.round(entity.mineCooldownMs ?? 0));
+                                entity.mining.cooldownMs = workerCadenceMs > 0
+                                    ? Math.min(workerCadenceMs, toolCadenceMs)
+                                    : toolCadenceMs;
+                                entity.mining.miningProgressMs += deltaMs;
+                                if (hit.opened) {
+                                    entity.mining.carriedOre += 1;
+                                    entity.mining.lastMinedX = entity.mining.targetX;
+                                    entity.mining.lastMinedY = entity.mining.targetY;
+                                    this.releaseMineTarget(entity.mining.targetX, entity.mining.targetY, entity.id);
+
+                                    const home = entity.mining.homeId ? this.entities.get(entity.mining.homeId) : null;
+                                    if (home) {
+                                        const returnTarget = this.findNearestDropoffTile(home, entity.x, entity.y);
+                                        if (returnTarget) {
+                                            const path = this.findOpenPath(entity.x, entity.y, returnTarget.x, returnTarget.y, 15000);
+                                            if (path) {
+                                                entity.movement = {
+                                                    path,
+                                                    stepIndex: 1,
+                                                    progress: 0,
+                                                    mode: 'return',
+                                                    homeId: home.id,
+                                                };
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (entity.x !== previousX || entity.y !== previousY || (!entity.commandsPaused && (entity.movement || entity.mining))) {
+                movedWorkers.push(entity);
+                this.markChunkDirtyAt(previousX, previousY);
+                this.applyWorkerVisibility(entity);
+                this.markChunkDirtyAt(Math.floor(entity.x), Math.floor(entity.y));
+            }
+        }
+
+        const player = this.getMainPlayerEntity();
+        if (player) {
+            const previousX = player.x;
+            const previousY = player.y;
+
+            if (!player.commandsPaused && player.movement) {
+                const speed = Math.max(0.1, player.walking?.speedTilesPerSecond ?? player.moveSpeedTilesPerSecond ?? PLAYER_MOVE_SPEED_TILES_PER_SECOND);
+                let remainingTiles = (speed * deltaMs) / 1000;
+
+                while (remainingTiles > 0 && player.movement.stepIndex < player.movement.path.length) {
+                    const nextPoint = player.movement.path[player.movement.stepIndex];
+                    const distance = Math.hypot(nextPoint.x - player.x, nextPoint.y - player.y);
+                    if (distance === 0) {
+                        player.x = nextPoint.x;
+                        player.y = nextPoint.y;
+                        player.movement.stepIndex++;
+                        player.movement.progress = 0;
+                        continue;
+                    }
+
+                    const step = Math.min(remainingTiles, distance);
+                    const ratio = step / distance;
+                    player.x += (nextPoint.x - player.x) * ratio;
+                    player.y += (nextPoint.y - player.y) * ratio;
+                    player.movement.progress += step;
+                    remainingTiles -= step;
+
+                    if (Math.hypot(nextPoint.x - player.x, nextPoint.y - player.y) <= 0.001) {
+                        player.x = nextPoint.x;
+                        player.y = nextPoint.y;
+                        player.movement.stepIndex++;
+                        player.movement.progress = 0;
+                    }
+                }
+
+                if (player.movement.stepIndex >= player.movement.path.length) {
+                    player.movement = null;
+                    this.completeCurrentPlayerCommand(player);
+                    this.tryStartNextPlayerCommand(player);
+                }
+            } else if (!player.commandsPaused) {
+                this.tryStartNextPlayerCommand(player);
+            }
+
+            if (player.x !== previousX || player.y !== previousY || (!player.commandsPaused && player.movement)) {
+                this.markChunkDirtyAt(previousX, previousY);
+                this.revealAround(player.x, player.y, Math.max(1, Math.floor(player.visibilityRadius)));
+                this.ensureChunksAround(player.x, player.y, 1);
+                this.markChunkDirtyAt(Math.floor(player.x), Math.floor(player.y));
+            }
+        }
     }
 
     getDirtyChunkKeys(): string[] {
@@ -349,6 +1382,8 @@ export class WorldModel {
     }
 
     getTile(x: number, y: number): Tile | undefined {
+        x = Math.floor(x);
+        y = Math.floor(y);
         if (!this.isInBounds(x, y)) return undefined;
         return this.tiles[this.index(x, y)];
     }
@@ -500,6 +1535,7 @@ export class WorldModel {
         this.stabilizeAsteroidBodies();
         this.chooseBaseSpawn();
         this.ensureBaseEntity();
+        this.ensureMainPlayerEntity();
         this.assignAsteroidBiomes();
         this.createStartCave();
         this.revealFromOpenTiles();
@@ -948,6 +1984,51 @@ export class WorldModel {
         return changed;
     }
 
+    private revealAroundWithLimitedBiomePenetration(x: number, y: number, radius: number, biomePenetrationDepth: number): number {
+        let changed = 0;
+
+        for (let oy = -radius; oy <= radius; oy++) {
+            for (let ox = -radius; ox <= radius; ox++) {
+                if (ox * ox + oy * oy > radius * radius) continue;
+                const tx = x + ox;
+                const ty = y + oy;
+                const tile = this.getTile(tx, ty);
+                if (!tile) continue;
+
+                const before = tile.visibility;
+
+                // Open tiles get full illumination
+                if (!tile.solid) {
+                    tile.visibility = 'Open';
+                } else {
+                    // Solid tiles (biomes): only reveal if at the edge or within penetration depth
+                    // Count distance to nearest open tile (but limit check for performance)
+                    let distanceToOpen = Number.POSITIVE_INFINITY;
+                    for (let checkY = Math.max(ty - biomePenetrationDepth - 1, 0); checkY <= Math.min(ty + biomePenetrationDepth + 1, this.heightValue - 1); checkY++) {
+                        for (let checkX = Math.max(tx - biomePenetrationDepth - 1, 0); checkX <= Math.min(tx + biomePenetrationDepth + 1, this.widthValue - 1); checkX++) {
+                            const checkTile = this.getTile(checkX, checkY);
+                            if (checkTile && !checkTile.solid) {
+                                const dist = Math.hypot(checkX - tx, checkY - ty);
+                                if (dist < distanceToOpen) {
+                                    distanceToOpen = dist;
+                                }
+                            }
+                        }
+                    }
+
+                    // Reveal if at the edge or within penetration depth
+                    if (distanceToOpen <= biomePenetrationDepth + 0.5) {
+                        tile.visibility = 'Revealed';
+                    }
+                }
+
+                if (tile.visibility !== before) changed++;
+                this.markChunkDirtyAt(tx, ty);
+            }
+        }
+        return changed;
+    }
+
     private isTileVisible(tile: Tile): boolean {
         return tile.visibility === 'Open' || tile.visibility === 'Revealed' || tile.visibility === 'EdgeHint';
     }
@@ -1186,6 +2267,69 @@ export class WorldModel {
         return this.entities.get(BASE_ENTITY_ID) ?? null;
     }
 
+    private ensureMainPlayerEntity(): void {
+        const existing = this.entities.get(MAIN_PLAYER_ENTITY_ID);
+        if (existing) {
+            existing.x = Math.round(existing.x);
+            existing.y = Math.round(existing.y);
+            existing.visibilityRadius = PLAYER_VISIBILITY_RADIUS;
+            existing.mobility = 'dynamic';
+            existing.kind = 'player';
+            existing.parentId = null;
+            existing.moveSpeedTilesPerSecond = existing.moveSpeedTilesPerSecond ?? PLAYER_MOVE_SPEED_TILES_PER_SECOND;
+            existing.walking = existing.walking ?? {
+                speedTilesPerSecond: existing.moveSpeedTilesPerSecond,
+            };
+            existing.builder = existing.builder ?? {
+                buildRadius: PLAYER_BUILD_RADIUS,
+                buildables: ['beacon'],
+            };
+            existing.inventoryDef = existing.inventoryDef ?? {
+                capacity: 999,
+                sharedId: 'main-player',
+            };
+            existing.miningDef = existing.miningDef ?? {
+                minePower: 1,
+                mineCooldownMs: 160,
+                carryCapacity: 999,
+            };
+            return;
+        }
+
+        this.entities.set(MAIN_PLAYER_ENTITY_ID, {
+            id: MAIN_PLAYER_ENTITY_ID,
+            kind: 'player',
+            mobility: 'dynamic',
+            x: this.baseXValue,
+            y: this.baseYValue,
+            visibilityRadius: PLAYER_VISIBILITY_RADIUS,
+            moveSpeedTilesPerSecond: PLAYER_MOVE_SPEED_TILES_PER_SECOND,
+            parentId: null,
+            walking: {
+                speedTilesPerSecond: PLAYER_MOVE_SPEED_TILES_PER_SECOND,
+            },
+            builder: {
+                buildRadius: PLAYER_BUILD_RADIUS,
+                buildables: ['beacon'],
+            },
+            inventoryDef: {
+                capacity: 999,
+                sharedId: 'main-player',
+            },
+            miningDef: {
+                minePower: 1,
+                mineCooldownMs: 160,
+                carryCapacity: 999,
+            },
+        });
+    }
+
+    private getMainPlayerEntity(): WorldEntity | null {
+        const player = this.entities.get(MAIN_PLAYER_ENTITY_ID) ?? null;
+        if (!player || player.kind !== 'player') return null;
+        return player;
+    }
+
     private syncBaseFromEntity(): void {
         const base = this.getBaseEntity();
         if (!base) return;
@@ -1195,8 +2339,23 @@ export class WorldModel {
 
     private applyEntityVisibility(): void {
         for (const entity of this.entities.values()) {
-            this.revealAround(entity.x, entity.y, Math.max(1, Math.floor(entity.visibilityRadius)));
+            if (entity.kind === 'worker' && entity.deployed !== true) {
+                continue;
+            }
+            if (entity.kind === 'beacon') {
+                // Beacons have limited penetration into biomes (solid tiles)
+                this.revealAroundWithLimitedBiomePenetration(entity.x, entity.y, Math.max(1, Math.floor(entity.visibilityRadius)), BEACON_BIOME_PENETRATION_DEPTH);
+            } else {
+                // Base and other entities illuminate fully
+                this.revealAround(entity.x, entity.y, Math.max(1, Math.floor(entity.visibilityRadius)));
+            }
         }
+    }
+
+    private applyWorkerVisibility(worker: WorldEntity): void {
+        if (worker.kind !== 'worker') return;
+        if (!worker.deployed) return;
+        this.revealAround(worker.x, worker.y, Math.max(1, Math.floor(worker.visibilityRadius)));
     }
 
     private markModifiedAt(x: number, y: number): void {
@@ -1217,7 +2376,18 @@ export class WorldModel {
         return nearest;
     }
 
+    private resolveBuilderEntity(builderEntityId?: string): WorldEntity | null {
+        const requested = builderEntityId ? this.entities.get(builderEntityId) ?? null : null;
+        if (requested) return requested;
+        return this.getMainPlayerEntity();
+    }
+
     private findOpenPath(fromX: number, fromY: number, toX: number, toY: number, maxSteps: number): Array<{ x: number; y: number }> | null {
+        fromX = Math.round(fromX);
+        fromY = Math.round(fromY);
+        toX = Math.round(toX);
+        toY = Math.round(toY);
+
         const startTile = this.getTile(fromX, fromY);
         const targetTile = this.getTile(toX, toY);
         if (!startTile || !targetTile || startTile.solid || targetTile.solid) return null;
@@ -1256,6 +2426,349 @@ export class WorldModel {
         return null;
     }
 
+    private findBeaconLinkPath(fromX: number, fromY: number, toX: number, toY: number, maxSteps: number): Array<{ x: number; y: number }> | null {
+        const openPath = this.findOpenPath(fromX, fromY, toX, toY, maxSteps);
+        if (openPath) return openPath;
+
+        const linePath = this.buildLinePath(fromX, fromY, toX, toY);
+        return linePath.length > 0 ? linePath : null;
+    }
+
+    private buildLinePath(fromX: number, fromY: number, toX: number, toY: number): Array<{ x: number; y: number }> {
+        const points: Array<{ x: number; y: number }> = [];
+
+        let x = fromX;
+        let y = fromY;
+        const dx = Math.abs(toX - fromX);
+        const dy = Math.abs(toY - fromY);
+        const sx = fromX < toX ? 1 : -1;
+        const sy = fromY < toY ? 1 : -1;
+        let err = dx - dy;
+
+        while (true) {
+            if (this.isInBounds(x, y)) {
+                points.push({ x, y });
+            }
+            if (x === toX && y === toY) break;
+            const e2 = err * 2;
+            if (e2 > -dy) {
+                err -= dy;
+                x += sx;
+            }
+            if (e2 < dx) {
+                err += dx;
+                y += sy;
+            }
+        }
+
+        return points;
+    }
+
+    private findDeploymentTile(building: WorldEntity): { x: number; y: number } | null {
+        const minRadius = building.kind === 'base' ? 3 : 2;
+        const maxRadius = 12;
+
+        for (let radius = minRadius; radius <= maxRadius; radius++) {
+            for (let oy = -radius; oy <= radius; oy++) {
+                for (let ox = -radius; ox <= radius; ox++) {
+                    if (Math.max(Math.abs(ox), Math.abs(oy)) !== radius) continue;
+                    const tx = building.x + ox;
+                    const ty = building.y + oy;
+                    const tile = this.getTile(tx, ty);
+                    if (!tile || tile.solid || tile.visibility === 'Unknown') continue;
+                    if (building.kind === 'base' && Math.abs(tx - building.x) <= 2 && Math.abs(ty - building.y) <= 2) continue;
+                    if (this.isEntityOccupied(tx, ty)) continue;
+                    return { x: tx, y: ty };
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private isEntityOccupied(x: number, y: number, ignoreEntityId?: string): boolean {
+        for (const entity of this.entities.values()) {
+            if (ignoreEntityId && entity.id === ignoreEntityId) continue;
+            if (entity.kind === 'worker' && entity.deployed !== true) continue;
+            if (entity.kind === 'base') {
+                if (Math.abs(entity.x - x) <= 2 && Math.abs(entity.y - y) <= 2) {
+                    return true;
+                }
+                continue;
+            }
+            if (Math.round(entity.x) === x && Math.round(entity.y) === y) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private canWorkerMineTileForWorker(worker: WorldEntity, x: number, y: number): boolean {
+        const tool = worker.toolId ? getToolDefinition(worker.toolId) : undefined;
+        if (!tool || tool.tileDamage <= 0) return false;
+
+        const tile = this.getTile(x, y);
+        if (!tile || !tile.solid || tile.visibility === 'Unknown') return false;
+        if (!this.isMineableFrontierSolid(x, y)) return false;
+        if (this.isMineTargetReserved(x, y, worker.id)) return false;
+        return true;
+    }
+
+    private findMineApproachPath(worker: WorldEntity, targetX: number, targetY: number): { path: Array<{ x: number; y: number }>; approachX: number; approachY: number } | null {
+        const startX = Math.round(worker.x);
+        const startY = Math.round(worker.y);
+        const startTile = this.getTile(startX, startY);
+        if (!startTile || startTile.solid) return null;
+
+        const queue: Array<{ x: number; y: number }> = [{ x: startX, y: startY }];
+        const previous = new Map<string, string | null>();
+        previous.set(`${startX},${startY}`, null);
+
+        while (queue.length > 0) {
+            const current = queue.shift();
+            if (!current) continue;
+
+            for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+                const neighborX = current.x + ox;
+                const neighborY = current.y + oy;
+                if (neighborX === targetX && neighborY === targetY) {
+                    const path: Array<{ x: number; y: number }> = [];
+                    let key: string | null = `${current.x},${current.y}`;
+                    while (key) {
+                        const [px, py] = key.split(',').map(Number);
+                        path.push({ x: px, y: py });
+                        key = previous.get(key) ?? null;
+                    }
+                    path.reverse();
+                    return { path, approachX: current.x, approachY: current.y };
+                }
+
+                const neighborTile = this.getTile(neighborX, neighborY);
+                if (!neighborTile || neighborTile.solid) continue;
+                const key = `${neighborX},${neighborY}`;
+                if (previous.has(key)) continue;
+                previous.set(key, `${current.x},${current.y}`);
+                queue.push({ x: neighborX, y: neighborY });
+            }
+        }
+
+        return null;
+    }
+
+    private findClosestMineTargetPlan(
+        worker: WorldEntity,
+        options: {
+            anchorX: number;
+            anchorY: number;
+            lastMinedX: number;
+            lastMinedY: number;
+        },
+    ): ScanNearestPlan | null {
+        const home = worker.homeId ? this.entities.get(worker.homeId) : this.getBaseEntity();
+        const baseX = Math.round(home?.x ?? this.baseX);
+        const baseY = Math.round(home?.y ?? this.baseY);
+
+        return this.scanNearestBehavior.chooseNextPlan({
+            workerX: worker.x,
+            workerY: worker.y,
+            anchorX: options.anchorX,
+            anchorY: options.anchorY,
+            lastMinedX: options.lastMinedX,
+            lastMinedY: options.lastMinedY,
+            baseX,
+            baseY,
+            isOpenTile: (x, y) => {
+                const tile = this.getTile(x, y);
+                return !!tile && !tile.solid;
+            },
+            canTargetTile: (x, y) => this.canWorkerMineTileForWorker(worker, x, y),
+            countSolidNeighbors: (x, y) => this.countSolidNeighbors(x, y),
+            buildPath: (fromX, fromY, toX, toY) => this.findOpenPath(fromX, fromY, toX, toY, 25000),
+        });
+    }
+
+    private reserveMineTarget(x: number, y: number, workerId: string): boolean {
+        const key = `${x},${y}`;
+        const reservedBy = this.mineReservations.get(key);
+        if (reservedBy && reservedBy !== workerId) return false;
+        this.mineReservations.set(key, workerId);
+        return true;
+    }
+
+    private isMineTargetReserved(x: number, y: number, workerId: string): boolean {
+        const reservedBy = this.mineReservations.get(`${x},${y}`);
+        return !!reservedBy && reservedBy !== workerId;
+    }
+
+    private releaseMineTarget(x: number, y: number, workerId?: string): void {
+        const key = `${x},${y}`;
+        const reservedBy = this.mineReservations.get(key);
+        if (!reservedBy) return;
+        if (workerId && reservedBy !== workerId) return;
+        this.mineReservations.delete(key);
+    }
+
+    private clearWorkerMining(worker: WorldEntity): void {
+        if (worker.mining) {
+            this.releaseMineTarget(worker.mining.targetX, worker.mining.targetY, worker.id);
+        }
+        worker.mining = null;
+    }
+
+    private clearWorkerMovement(worker: WorldEntity): void {
+        worker.movement = null;
+    }
+
+    private getWorkerCommandList(worker: WorldEntity): CommandListComponent<WorkerEntityCommandType, WorkerEntityCommandPayload> {
+        return new CommandListComponent<WorkerEntityCommandType, WorkerEntityCommandPayload>(worker.commandList as WorkerEntityCommandList ?? undefined);
+    }
+
+    private setWorkerCommandList(worker: WorldEntity, commandList: CommandListComponent<WorkerEntityCommandType, WorkerEntityCommandPayload>): void {
+        worker.commandList = commandList.snapshot();
+    }
+
+    private getPlayerCommandList(player: WorldEntity): CommandListComponent<PlayerEntityCommandType, PlayerEntityCommandPayload> {
+        return new CommandListComponent<PlayerEntityCommandType, PlayerEntityCommandPayload>(player.commandList as PlayerEntityCommandList ?? undefined);
+    }
+
+    private setPlayerCommandList(player: WorldEntity, commandList: CommandListComponent<PlayerEntityCommandType, PlayerEntityCommandPayload>): void {
+        player.commandList = commandList.snapshot();
+    }
+
+    private completeCurrentPlayerCommand(player: WorldEntity): void {
+        const commandList = this.getPlayerCommandList(player);
+        commandList.completeCurrent();
+        this.setPlayerCommandList(player, commandList);
+    }
+
+    private tryStartNextPlayerCommand(player: WorldEntity): void {
+        if (player.movement) return;
+        if (player.commandsPaused) return;
+
+        const commandList = this.getPlayerCommandList(player);
+        const state = commandList.snapshot();
+        if (state.current) return;
+
+        while (true) {
+            const next = commandList.shiftNext();
+            if (!next) {
+                this.setPlayerCommandList(player, commandList);
+                return;
+            }
+
+            if (next.type !== 'move' || !Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
+                commandList.completeCurrent();
+                continue;
+            }
+
+            const tx = Number(next.payload.x);
+            const ty = Number(next.payload.y);
+
+            this.ensureWorldContainsTile(tx, ty);
+            const tile = this.getTile(tx, ty);
+            if (!tile || tile.solid || tile.visibility === 'Unknown' || this.isEntityOccupied(tx, ty, player.id)) {
+                commandList.completeCurrent();
+                continue;
+            }
+
+            const path = this.findOpenPath(player.x, player.y, tx, ty, 20000);
+            if (!path || path.length <= 1) {
+                commandList.completeCurrent();
+                continue;
+            }
+
+            player.movement = { path, stepIndex: 1, progress: 0, mode: 'move' };
+            this.setPlayerCommandList(player, commandList);
+            return;
+        }
+    }
+
+    private completeCurrentWorkerCommand(worker: WorldEntity): void {
+        const commandList = this.getWorkerCommandList(worker);
+        commandList.completeCurrent();
+        this.setWorkerCommandList(worker, commandList);
+    }
+
+    private tryStartNextWorkerCommand(worker: WorldEntity): void {
+        if (worker.movement || worker.mining) return;
+        if (worker.commandsPaused) return;
+
+        const commandList = this.getWorkerCommandList(worker);
+        const state = commandList.snapshot();
+        if (state.current) return;
+
+        while (true) {
+            const next = commandList.shiftNext();
+            if (!next) {
+                this.setWorkerCommandList(worker, commandList);
+                return;
+            }
+
+            let result: WorkerActionResult;
+            if (next.type === 'move') {
+                if (!Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
+                    result = { ok: false, reason: 'invalid_target' };
+                } else {
+                    result = this.beginMoveWorkerTo(worker, Number(next.payload.x), Number(next.payload.y));
+                }
+            } else if (next.type === 'mine') {
+                if (!Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
+                    result = { ok: false, reason: 'invalid_target' };
+                } else {
+                    result = this.beginWorkerMining(worker, Number(next.payload.x), Number(next.payload.y), next.payload.repeat !== false);
+                }
+            } else {
+                result = this.beginRecallWorker(worker);
+            }
+
+            if (result.ok) {
+                this.setWorkerCommandList(worker, commandList);
+                return;
+            }
+
+            commandList.completeCurrent();
+        }
+    }
+
+    private isInBaseDropoffZone(base: WorldEntity, x: number, y: number): boolean {
+        if (base.kind !== 'base') return false;
+        return Math.abs(x - base.x) <= 3 && Math.abs(y - base.y) <= 3;
+    }
+
+    private findNearestDropoffTile(base: WorldEntity, fromX: number, fromY: number): { x: number; y: number } | null {
+        const startX = Math.round(fromX);
+        const startY = Math.round(fromY);
+        const maxRadius = 4;
+        let best: { x: number; y: number; score: number } | null = null;
+
+        for (let oy = -maxRadius; oy <= maxRadius; oy++) {
+            for (let ox = -maxRadius; ox <= maxRadius; ox++) {
+                const tx = base.x + ox;
+                const ty = base.y + oy;
+                if (Math.max(Math.abs(ox), Math.abs(oy)) > maxRadius) continue;
+                if (!this.isInBaseDropoffZone(base, tx, ty)) continue;
+                const tile = this.getTile(tx, ty);
+                if (!tile || tile.solid || tile.visibility === 'Unknown') continue;
+                if (this.isEntityOccupied(tx, ty, base.id)) continue;
+                const score = Math.abs(tx - startX) + Math.abs(ty - startY);
+                if (!best || score < best.score) {
+                    best = { x: tx, y: ty, score };
+                }
+            }
+        }
+
+        return best ? { x: best.x, y: best.y } : this.findDeploymentTile(base);
+    }
+
+    private rebuildMineReservationsFromEntities(): void {
+        this.mineReservations.clear();
+        for (const entity of this.entities.values()) {
+            if (entity.kind !== 'worker') continue;
+            if (!entity.mining) continue;
+            this.mineReservations.set(`${entity.mining.targetX},${entity.mining.targetY}`, entity.id);
+        }
+    }
+
     private applyBeaconPathLighting(path: Array<{ x: number; y: number }>): void {
         for (const point of path) {
             const tile = this.getTile(point.x, point.y);
@@ -1279,9 +2792,24 @@ export class WorldModel {
                 ? beaconMap.get(beacon.parentId)
                 : { x: this.baseX, y: this.baseY };
             if (!source) continue;
-            const path = this.findOpenPath(source.x, source.y, beacon.x, beacon.y, 8000);
+            const path = this.findBeaconLinkPath(source.x, source.y, beacon.x, beacon.y, 8000);
             if (!path) continue;
             this.applyBeaconPathLighting(path);
         }
+    }
+
+    private recalculateVisibilityFromCurrentState(): void {
+        for (let y = 0; y < this.height; y++) {
+            for (let x = 0; x < this.width; x++) {
+                const tile = this.getTile(x, y);
+                if (!tile) continue;
+                tile.visibility = tile.solid ? 'Unknown' : 'Open';
+                this.markChunkDirtyAt(x, y);
+            }
+        }
+
+        this.revealFromOpenTiles();
+        this.rebuildBeaconLighting();
+        this.applyEntityVisibility();
     }
 }

@@ -9,6 +9,7 @@ type InventoryPanelOptions = {
     onWindowStateChange: (state: InventoryWindowMeta) => void;
     onEquipTool: (toolId: string) => void;
     onInspectItem: (selection: { item: InventoryItemInstance; definition: InventoryItemDefinition; isEquipped: boolean }) => void;
+    onStateChange?: (state: InventoryState) => void;
 };
 
 type OccupiedCell = {
@@ -29,6 +30,7 @@ export type InventoryPanel = {
     open: () => void;
     setEquippedTool: (toolId: string) => void;
     addItem: (definitionId: string, quantity: number) => number;
+    replaceState: (next: InventoryState) => void;
     destroy: () => void;
     getState: () => InventoryState;
 };
@@ -40,6 +42,10 @@ const PLAYER_INVENTORY_ID = 'player';
 export function createInventoryPanel(options: InventoryPanelOptions): InventoryPanel {
     const state = createDebugInventoryState();
     state.equippedToolId = options.initialEquippedToolId;
+
+    const notifyStateChange = () => {
+        options.onStateChange?.(state);
+    };
 
     const frame = createFloatingWindow({
         title: 'Inventory',
@@ -93,6 +99,7 @@ export function createInventoryPanel(options: InventoryPanelOptions): InventoryP
         state.equippedToolId = toolId;
         options.onEquipTool(toolId);
         render();
+        notifyStateChange();
     };
 
     render();
@@ -105,13 +112,36 @@ export function createInventoryPanel(options: InventoryPanelOptions): InventoryP
         setEquippedTool: (toolId: string) => {
             state.equippedToolId = toolId;
             render();
+            notifyStateChange();
         },
         addItem: (definitionId: string, quantity: number) => {
             const added = addInventoryItem(state, definitionId, quantity, PLAYER_INVENTORY_ID);
             if (added > 0) {
                 render();
+                notifyStateChange();
             }
             return added;
+        },
+        replaceState: (next: InventoryState) => {
+            state.containers = Object.fromEntries(
+                Object.entries(next.containers).map(([id, container]) => [
+                    id,
+                    {
+                        id: container.id,
+                        sections: {
+                            storage: { ...container.sections.storage },
+                            hotbar: { ...container.sections.hotbar },
+                        },
+                    },
+                ]),
+            );
+            state.items = next.items.map((item) => ({
+                ...item,
+                location: { ...item.location },
+            }));
+            state.equippedToolId = next.equippedToolId;
+            render();
+            notifyStateChange();
         },
         destroy: () => {
             frame.destroy();
@@ -300,6 +330,7 @@ export function createInventoryPanel(options: InventoryPanelOptions): InventoryP
             }
             clearDropPreview();
             render();
+            notifyStateChange();
         });
 
         sectionRoot.append(sectionTitle, grid);

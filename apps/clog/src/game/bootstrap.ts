@@ -1,6 +1,7 @@
 import { Application } from 'pixi.js';
 import { LocalTransport } from './core/LocalTransport';
 import { GameSimulation } from './core/GameSimulation';
+import type { GameEvent } from './core/protocol';
 import { WEAPON_DEFINITIONS } from './core/ToolComponent';
 import { GameScene } from './scenes/GameScene';
 import { GameMetaStore } from './meta/GameMetaStore';
@@ -13,19 +14,21 @@ import { createToolInspectorPanel } from './ui/ToolInspectorPanel';
 import { createWindowControlRail } from './ui/WindowControlRail';
 import { createDebugGraphWindow } from './ui/DebugGraphWindow';
 import { ViewportSpace } from './core/ViewportSpace';
-import { getInventoryItemDefinition, getTotalResourceCount, createDebugInventoryState } from './inventory/InventoryModel';
+import { getInventoryItemDefinition, getTotalResourceCount } from './inventory/InventoryModel';
 import {
     createWorldAutosave,
     getDropDefinitionIdForBiome,
+    loadInventoryState,
     loadMetaFromCookie,
-    loadSnapshot,
+    loadSnapshot, normalizeEntityDetailsMeta,
     normalizeInventoryItemDetailsMeta,
     normalizeInventoryMeta,
     normalizeMapControlsMeta,
     normalizeMinimapMeta,
     normalizeToolInspectorMeta,
+    saveInventoryState,
     saveMetaToCookie,
-    saveSnapshot,
+    saveSnapshot
 } from './bootstrap/storage';
 import { createActionButton, getToolIconSvg, makeIconSvg } from './bootstrap/icons';
 import { createTopMenu } from './bootstrap/topMenu';
@@ -59,6 +62,35 @@ export async function bootstrapGame(): Promise<void> {
     }
 
     let mainActionToolId = simulation.tools.getActiveTool().id;
+    let pendingWorkerOreDelivered = 0;
+
+    const persistedMeta = loadMetaFromCookie();
+    const initialMinimap = normalizeMinimapMeta(persistedMeta?.windows?.minimap ?? {});
+    const initialMapControls = normalizeMapControlsMeta(persistedMeta?.windows?.mapControls ?? {});
+    const initialInventory = normalizeInventoryMeta(persistedMeta?.windows?.inventory ?? {});
+    const initialToolInspector = normalizeToolInspectorMeta(persistedMeta?.windows?.toolInspector ?? {});
+    const initialInventoryItemDetails = normalizeInventoryItemDetailsMeta(persistedMeta?.windows?.inventoryItemDetails ?? {});
+    const initialEntityDetails = normalizeEntityDetailsMeta(persistedMeta?.windows?.entityDetails ?? {});
+    const initialBuildPanel = persistedMeta?.windows?.buildPanel ?? {
+        open: false,
+        minimized: false,
+        left: 16,
+        top: 100,
+        width: 400,
+        height: 320,
+    };
+
+    const metaStore = new GameMetaStore({
+        windows: {
+            minimap: initialMinimap,
+            mapControls: initialMapControls,
+            inventory: initialInventory,
+            toolInspector: initialToolInspector,
+            inventoryItemDetails: initialInventoryItemDetails,
+            entityDetails: initialEntityDetails,
+            buildPanel: initialBuildPanel,
+        },
+    });
 
     let toolInspector: ReturnType<typeof createToolInspectorPanel> | null = null;
     let onToolEquippedExternally: (toolId: string) => void = () => { };
@@ -80,6 +112,25 @@ export async function bootstrapGame(): Promise<void> {
             if (!inventoryPanel) return 0;
             return getTotalResourceCount(inventoryPanel.getState(), 'debug-asteroid-ore') ?? 0;
         },
+        (amount) => {
+            pendingWorkerOreDelivered += amount;
+            // Worker deliveries only happen when a mining tile was opened.
+            // Flush immediately so opened tiles do not reappear after refresh.
+            worldAutosave.flush();
+            if (!inventoryPanel) return;
+            const added = inventoryPanel.addItem('debug-asteroid-ore', pendingWorkerOreDelivered);
+            pendingWorkerOreDelivered -= added;
+            resourcesPanel?.update();
+            panel.setStatus(`Collected ${added} ore from worker delivery.`);
+        },
+        initialEntityDetails,
+        (state) => {
+            metaStore.updateEntityDetails(state);
+        },
+        initialBuildPanel,
+        (state) => {
+            metaStore.updateBuildPanel(state);
+        },
     );
     scene.initialize();
     const viewportSpace = ViewportSpace.get();
@@ -87,23 +138,6 @@ export async function bootstrapGame(): Promise<void> {
     // Ensure render systems are alive before mounting windowed UI.
     await new Promise<void>((resolve) => {
         requestAnimationFrame(() => resolve());
-    });
-
-    const persistedMeta = loadMetaFromCookie();
-    const initialMinimap = normalizeMinimapMeta(persistedMeta?.windows?.minimap ?? {});
-    const initialMapControls = normalizeMapControlsMeta(persistedMeta?.windows?.mapControls ?? {});
-    const initialInventory = normalizeInventoryMeta(persistedMeta?.windows?.inventory ?? {});
-    const initialToolInspector = normalizeToolInspectorMeta(persistedMeta?.windows?.toolInspector ?? {});
-    const initialInventoryItemDetails = normalizeInventoryItemDetailsMeta(persistedMeta?.windows?.inventoryItemDetails ?? {});
-
-    const metaStore = new GameMetaStore({
-        windows: {
-            minimap: initialMinimap,
-            mapControls: initialMapControls,
-            inventory: initialInventory,
-            toolInspector: initialToolInspector,
-            inventoryItemDetails: initialInventoryItemDetails,
-        },
     });
 
     let persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -286,7 +320,37 @@ export async function bootstrapGame(): Promise<void> {
     let inventoryItemDetails: ReturnType<typeof createInventoryItemDetailsWindow> | null = null;
     let inventoryPanel: ReturnType<typeof createInventoryPanel> | null = null;
     let resourcesPanel: ReturnType<typeof createResourcesPanel> | null = null;
-    let panel: ReturnType<typeof createMapControlPanel> | null = null;
+
+    const panel = createMapControlPanel({
+        initialSeed: simulation.world.getSeed(),
+        weapons: WEAPON_DEFINITIONS,
+        initialWeaponId: simulation.tools.getActiveTool().id,
+        initialWindowState: initialMapControls,
+        onWindowStateChange: (state) => {
+            metaStore.updateMapControls(state);
+        },
+        onSelectWeapon: (weaponId) => {
+            applyEquippedTool(weaponId, true);
+            const next = WEAPON_DEFINITIONS.find((entry) => entry.id === weaponId);
+            if (!next) return;
+            panel.setStatus(`Selected weapon: ${next.name}.`);
+        },
+        onGenerate: (seed) => {
+            transport.send({ type: 'GenerateWorld', seed });
+            panel.setStatus(`Generated map with seed ${seed}.`);
+        },
+        onSave: () => {
+            saveSnapshot(simulation.world.toSnapshot());
+            if (inventoryPanel) {
+                saveInventoryState(inventoryPanel.getState());
+            }
+            panel.setStatus(`Saved map with seed ${simulation.world.getSeed()}.`);
+        },
+        onCenterBase: () => {
+            scene.centerCameraOnBase();
+            minimap.refresh();
+        },
+    });
 
     toolInspector = createToolInspectorPanel({
         tools: WEAPON_DEFINITIONS,
@@ -314,6 +378,9 @@ export async function bootstrapGame(): Promise<void> {
         onWindowStateChange: (state) => {
             metaStore.updateInventory(state);
         },
+        onStateChange: (state) => {
+            saveInventoryState(state);
+        },
         onEquipTool: (toolId) => {
             applyEquippedTool(toolId, true);
         },
@@ -326,45 +393,25 @@ export async function bootstrapGame(): Promise<void> {
     // Set inventory on simulation for beacon cost checks
     simulation.inventory = inventoryPanel.getState();
 
-    // Now create the map panel UI with the inventory
-    panel = createMapControlPanel({
-        initialSeed: simulation.world.getSeed(),
-        weapons: WEAPON_DEFINITIONS,
-        initialWeaponId: simulation.tools.getActiveTool().id,
-        initialWindowState: initialMapControls,
-        inventory: inventoryPanel?.getState() ?? createDebugInventoryState(),
-        onWindowStateChange: (state) => {
-            metaStore.updateMapControls(state);
-        },
-        onSelectWeapon: (weaponId) => {
-            applyEquippedTool(weaponId, true);
-            const next = WEAPON_DEFINITIONS.find((entry) => entry.id === weaponId);
-            if (!next) return;
-            panel?.setStatus(`Selected weapon: ${next.name}.`);
-        },
-        onGenerate: (seed) => {
-            transport.send({ type: 'GenerateWorld', seed });
-            panel?.setStatus(`Generated map with seed ${seed}.`);
-        },
-        onSave: () => {
-            saveSnapshot(simulation.world.toSnapshot());
-            panel?.setStatus(`Saved map with seed ${simulation.world.getSeed()}.`);
-        },
-        onCenterBase: () => {
-            scene.centerCameraOnBase();
-            minimap.refresh();
-        },
-        onBuild: (itemId: string) => {
-            if (itemId === 'beacon') {
-                panel?.setStatus('Click right on a tile to place a beacon in build mode');
-            }
-        },
-    });
+    const persistedInventory = loadInventoryState();
+    if (persistedInventory) {
+        inventoryPanel.replaceState(persistedInventory);
+        applyEquippedTool(persistedInventory.equippedToolId, false);
+    } else {
+        saveInventoryState(inventoryPanel.getState());
+    }
 
     // Create resources panel in top-left corner
     resourcesPanel = createResourcesPanel({
         inventoryState: inventoryPanel.getState(),
     });
+
+    if (pendingWorkerOreDelivered > 0) {
+        const added = inventoryPanel.addItem('debug-asteroid-ore', pendingWorkerOreDelivered);
+        pendingWorkerOreDelivered -= added;
+        resourcesPanel?.update();
+        panel.setStatus(`Collected ${added} ore from worker delivery.`);
+    }
 
     // Refresh resources panel when inventory changes
     const inventoryAddItem = inventoryPanel.addItem.bind(inventoryPanel);
@@ -372,12 +419,13 @@ export async function bootstrapGame(): Promise<void> {
         const added = inventoryAddItem(definitionId, quantity);
         if (added > 0) {
             resourcesPanel?.update();
+            saveInventoryState(inventoryPanel.getState());
         }
         return added;
     };
 
     // NOW set up event handler after all UI is created
-    transport.onEvent((event) => {
+    transport.onEvent((event: GameEvent) => {
         if (event.type === 'WorldChunkDirty' || event.type === 'WorldGenerated') {
             minimap.refresh();
 
@@ -412,21 +460,145 @@ export async function bootstrapGame(): Promise<void> {
             worldAutosave.schedule();
         }
 
-        if (event.type === 'BeaconPlacementFailed') {
+        if (event.type === 'EntityPlacementFailed') {
             const reasonText = {
-                'too_far': 'Beacon too far from base or nearest beacon',
+                'too_far': 'Beacon is out of builder range',
                 'not_open': 'Beacon must be placed in open space',
                 'already_exists': 'Beacon already exists at this location',
                 'unknown_tile': 'Cannot place beacon here',
                 'insufficient_ore': 'Not enough ore (need 10)',
+                'not_builder': 'Selected entity cannot build beacons',
             }[event.reason];
             panel.setStatus(`Cannot place beacon: ${reasonText}`);
         }
 
-        if (event.type === 'BeaconPlaced') {
+        if (event.type === 'EntityPlaced') {
             panel.setStatus(`Beacon placed at (${event.x}, ${event.y}) - Cost: 10 ore`);
             resourcesPanel?.update();
             minimap.refresh();
+            if (inventoryPanel) {
+                saveInventoryState(inventoryPanel.getState());
+            }
+            worldAutosave.flush();
+        }
+
+        if (event.type === 'EntityRemoved') {
+            const refundText = event.refundOre > 0
+                ? `Refunded ${event.refundOre} ore.`
+                : 'No ore refunded (inventory full).';
+            panel.setStatus(`Beacon removed at (${event.x}, ${event.y}). ${refundText}`);
+            resourcesPanel?.update();
+            minimap.refresh();
+            if (inventoryPanel) {
+                saveInventoryState(inventoryPanel.getState());
+            }
+            worldAutosave.flush();
+        }
+
+        if (event.type === 'EntityRemovalFailed') {
+            const reasonText = event.reason === 'not_beacon'
+                ? 'Selected entity is not a beacon'
+                : 'Beacon not found';
+            panel.setStatus(`Cannot remove beacon: ${reasonText}.`);
+        }
+
+        if (event.type === 'WorkerSpawned') {
+            panel.setStatus(`Worker created at station (${event.buildingId}).`);
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'WorkerDeployed') {
+            panel.setStatus(`Worker deployed to (${event.x}, ${event.y}).`);
+            minimap.refresh();
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'WorkerRecalled') {
+            panel.setStatus('Worker is returning to station.');
+            minimap.refresh();
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'WorkersRecalled') {
+            panel.setStatus(`Returning ${event.count} worker(s) to station.`);
+            minimap.refresh();
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'WorkerMiningStarted') {
+            panel.setStatus(`Worker is mining (${event.x}, ${event.y}).`);
+            minimap.refresh();
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'WorkerMoved') {
+            panel.setStatus(`Worker is moving to (${event.x}, ${event.y}).`);
+            minimap.refresh();
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'WorkerCommandInterrupted') {
+            panel.setStatus(`Interrupted current command for ${event.workerId}.`);
+            minimap.refresh();
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'WorkerCommandsCleared') {
+            panel.setStatus(`Cleared command queue for ${event.workerId}.`);
+            minimap.refresh();
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'WorkerQueuedCommandRemoved') {
+            panel.setStatus(`Removed queued command ${event.commandId} from ${event.workerId}.`);
+            minimap.refresh();
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'PlayerQueuedCommandRemoved') {
+            panel.setStatus(`Removed queued walk command.`);
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'PlayerCommandInterrupted') {
+            panel.setStatus('Player movement interrupted.');
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'PlayerCommandsCleared') {
+            panel.setStatus('Player command queue cleared.');
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'PlayerCommandsPaused') {
+            panel.setStatus('Player queue paused.');
+        }
+
+        if (event.type === 'PlayerCommandsResumed') {
+            panel.setStatus('Player queue resumed.');
+        }
+
+        if (event.type === 'WorkerCommandsPaused') {
+            panel.setStatus(`Worker queue paused.`);
+        }
+
+        if (event.type === 'WorkerCommandsResumed') {
+            panel.setStatus(`Worker queue resumed.`);
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'WorkerActionFailed') {
+            const reasonText = {
+                not_found: 'entity not found',
+                not_worker: 'selected entity is not a worker',
+                invalid_building: 'building cannot host workers',
+                already_deployed: 'worker is already deployed',
+                already_recalled: 'worker is already docked',
+                no_deploy_space: 'no clear tile near station for deployment',
+                invalid_target: 'target tile is invalid or occupied',
+                path_blocked: 'worker cannot reach that location',
+            }[event.reason];
+            panel.setStatus(`Worker action failed: ${reasonText}.`);
         }
     });
 

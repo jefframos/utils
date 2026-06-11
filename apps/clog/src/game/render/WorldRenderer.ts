@@ -7,6 +7,7 @@ import { WorldModel } from '../world/WorldModel';
 export class WorldRenderer {
     private readonly chunkViews = new Map<string, Graphics>();
     private readonly entityOverlay = new Graphics();
+    private selectedEntityId: string | null = null;
 
     constructor(
         private readonly world: WorldModel,
@@ -35,6 +36,12 @@ export class WorldRenderer {
 
         this.drawEntityMarkers();
         this.world.clearDirtyChunks();
+    }
+
+    setSelectedEntity(entityId: string | null): void {
+        if (this.selectedEntityId === entityId) return;
+        this.selectedEntityId = entityId;
+        this.drawEntityMarkers();
     }
 
     private drawChunk(cx: number, cy: number, graphic: Graphics): void {
@@ -156,16 +163,41 @@ export class WorldRenderer {
         for (const entity of this.world.getEntities()) {
             const px = entity.x * TILE_SIZE;
             const py = entity.y * TILE_SIZE;
+            const isSelected = entity.id === this.selectedEntityId;
 
             if (entity.kind === 'base') {
                 this.entityOverlay.rect((entity.x - 2) * TILE_SIZE, (entity.y - 2) * TILE_SIZE, TILE_SIZE * 5, TILE_SIZE * 5).fill(0x1d4ed8);
                 this.entityOverlay.rect((entity.x - 1) * TILE_SIZE, (entity.y - 1) * TILE_SIZE, TILE_SIZE * 3, TILE_SIZE * 3).fill(0x93c5fd);
+                if (isSelected) {
+                    this.entityOverlay.rect((entity.x - 2) * TILE_SIZE, (entity.y - 2) * TILE_SIZE, TILE_SIZE * 5, TILE_SIZE * 5).stroke({ color: 0xffffff, width: 3, alpha: 0.9 });
+                }
                 continue;
             }
 
             if (entity.kind === 'beacon') {
                 this.entityOverlay.rect(px + 4, py + 4, TILE_SIZE - 8, TILE_SIZE - 8).fill(0xf59e0b);
                 this.entityOverlay.rect(px + 6, py + 6, TILE_SIZE - 12, TILE_SIZE - 12).fill(0xfbbf24);
+                if (isSelected) {
+                    this.entityOverlay.rect(px + 2, py + 2, TILE_SIZE - 4, TILE_SIZE - 4).stroke({ color: 0xffffff, width: 2, alpha: 0.95 });
+                }
+                continue;
+            }
+
+            if (entity.kind === 'player') {
+                this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, 6).fill(0x7c3aed);
+                this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, 3).fill(0xf3e8ff);
+                if (isSelected) {
+                    this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, 8).stroke({ color: 0xffffff, width: 2, alpha: 0.95 });
+                }
+                continue;
+            }
+
+            if (entity.kind === 'worker' && entity.deployed) {
+                this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, 5).fill(0x22c55e);
+                this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, 2).fill(0xdcfce7);
+                if (isSelected) {
+                    this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, 7).stroke({ color: 0xffffff, width: 2, alpha: 0.95 });
+                }
             }
         }
     }

@@ -56,6 +56,24 @@ export type InventoryItemDetailsWindowMeta = {
     height: number;
 };
 
+export type EntityDetailsWindowMeta = {
+    open: boolean;
+    minimized: boolean;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+};
+
+export type BuildPanelWindowMeta = {
+    open: boolean;
+    minimized: boolean;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+};
+
 export type GameMeta = {
     windows: {
         minimap: MinimapWindowMeta;
@@ -63,6 +81,8 @@ export type GameMeta = {
         inventory: InventoryWindowMeta;
         toolInspector: ToolInspectorWindowMeta;
         inventoryItemDetails: InventoryItemDetailsWindowMeta;
+        entityDetails: EntityDetailsWindowMeta;
+        buildPanel: BuildPanelWindowMeta;
     };
 };
 
@@ -140,6 +160,34 @@ export class GameMetaStore {
                 ...this.meta.windows,
                 inventoryItemDetails: {
                     ...this.meta.windows.inventoryItemDetails,
+                    ...next,
+                },
+            },
+        };
+        this.emit();
+    }
+
+    updateEntityDetails(next: Partial<EntityDetailsWindowMeta>): void {
+        this.meta = {
+            ...this.meta,
+            windows: {
+                ...this.meta.windows,
+                entityDetails: {
+                    ...this.meta.windows.entityDetails,
+                    ...next,
+                },
+            },
+        };
+        this.emit();
+    }
+
+    updateBuildPanel(next: Partial<BuildPanelWindowMeta>): void {
+        this.meta = {
+            ...this.meta,
+            windows: {
+                ...this.meta.windows,
+                buildPanel: {
+                    ...this.meta.windows.buildPanel,
                     ...next,
                 },
             },

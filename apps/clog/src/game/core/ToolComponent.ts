@@ -34,6 +34,10 @@ export const WEAPON_DEFINITIONS: ToolDefinition[] = [
 
 export const DEFAULT_TOOL: ToolDefinition = WEAPON_DEFINITIONS[0];
 
+export function getToolDefinition(toolId: string): ToolDefinition | undefined {
+    return WEAPON_DEFINITIONS.find((entry) => entry.id === toolId);
+}
+
 export class ToolComponent {
     private activeTool: ToolDefinition;
 

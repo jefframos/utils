@@ -1,4 +1,4 @@
-import { Application, BitmapFont, BitmapText, Container, FederatedPointerEvent, Graphics, Point } from 'pixi.js';
+﻿import { Application, BitmapFont, BitmapText, Container, FederatedPointerEvent, Graphics, Point } from 'pixi.js';
 import {
     TILE_SIZE,
     ZOOM_IN_FACTOR,
@@ -8,14 +8,21 @@ import {
 } from '../config';
 import type { ToolDefinition } from '../core/ToolComponent';
 import type { GameTransport, TileDamageHit } from '../core/protocol';
+import type { EntityDetailsWindowMeta } from '../meta/GameMetaStore';
 import { GameCamera, type WorldViewportRect } from '../camera/GameCamera';
 import { ViewportSpace } from '../core/ViewportSpace';
 import { WorldRenderer } from '../render/WorldRenderer';
-import { WorldModel } from '../world/WorldModel';
+import { WorldModel, type WorldEntity } from '../world/WorldModel';
 import { createContextMenuTemplate } from '../ui/ContextMenuTemplate';
+import { createEntityDetailsWindow } from '../ui/EntityDetailsWindow';
+import { createEntityFooter, type EntityFooter } from '../ui/EntityFooter';
+import { createBuildPanel, type BuildPanel, type BuildPanelMeta } from '../ui/BuildPanel';
+import type { BuildableEntityType } from '../content/buildables';
 
 export class GameScene {
     private static damagePopupFontInstalled = false;
+    private static readonly FIXED_STEP_MS = 1000 / 60;
+    private static readonly MAX_FIXED_STEPS_PER_FRAME = 5;
 
     private readonly camera = new Container();
     private readonly backgroundLayer = new Container();
@@ -39,6 +46,21 @@ export class GameScene {
     private primaryHoldMineCooldownMs = 0;
     private readonly damagePopups: Array<{ sprite: BitmapText; ttlMs: number; ageMs: number; velocityY: number }> = [];
     private readonly worldContextMenu = createContextMenuTemplate();
+    private readonly entityDetails: ReturnType<typeof createEntityDetailsWindow>;
+    private readonly entityFooter: EntityFooter;
+    private selectedEntityId: string | null = null;
+    private fixedUpdateAccumulatorMs = 0;
+    private readonly onWorkerOreDelivered: (amount: number) => void;
+    private buildMode: {
+        builderEntityId: string;
+        selectedBuildableType: BuildableEntityType | null;
+        previewX: number;
+        previewY: number;
+    } | null = null;
+    private readonly buildModeOverlay = new Graphics();
+    private buildPanel: BuildPanel | null = null;
+    private initialBuildPanelState: BuildPanelMeta;
+    private pausedWalkingEntityId: string | null = null;
 
     constructor(
         private readonly app: Application,
@@ -47,13 +69,148 @@ export class GameScene {
         private readonly getPrimaryTool: () => ToolDefinition,
         private readonly onToolSelected: (toolId: string) => void,
         private readonly getAvailableOre: () => number = () => 0,
+        onWorkerOreDelivered: (amount: number) => void = () => { },
+        initialEntityDetailsWindowState?: EntityDetailsWindowMeta,
+        onEntityDetailsWindowStateChange?: (state: EntityDetailsWindowMeta) => void,
+        initialBuildPanelState?: BuildPanelMeta,
+        onBuildPanelStateChange?: (state: BuildPanelMeta) => void,
     ) {
+        this.initialBuildPanelState = initialBuildPanelState ?? {
+            open: false,
+            minimized: false,
+            left: 16,
+            top: 100,
+            width: 400,
+            height: 320,
+        };
+        this.onWorkerOreDelivered = onWorkerOreDelivered;
         this.gameCamera = new GameCamera(this.app, this.camera);
         this.viewportSpace = ViewportSpace.initialize(this.app, this.gameCamera);
         this.renderer = new WorldRenderer(this.world, this.worldLayer, this.worldOverlayLayer);
+        this.entityDetails = createEntityDetailsWindow({
+            onDeleteBeacon: (entityId) => {
+                this.transport.send({ type: 'RemoveBeacon', entityId });
+            },
+            onSpawnWorker: (buildingId) => {
+                this.transport.send({ type: 'SpawnWorker', buildingId });
+            },
+            onDeployWorker: (workerId) => {
+                this.transport.send({ type: 'DeployWorker', workerId });
+            },
+            onRecallWorker: (workerId) => {
+                this.transport.send({ type: 'RecallWorker', workerId });
+            },
+            onRecallAllWorkers: (buildingId) => {
+                this.transport.send({ type: 'RecallWorkers', buildingId });
+            },
+            onInterruptWorkerCommand: (workerId) => {
+                this.transport.send({ type: 'InterruptWorkerCommand', workerId });
+            },
+            onClearWorkerCommands: (workerId) => {
+                this.transport.send({ type: 'ClearWorkerCommands', workerId });
+            },
+            onRemoveQueuedWorkerCommand: (workerId, commandId) => {
+                this.transport.send({ type: 'RemoveQueuedWorkerCommand', workerId, commandId });
+            },
+            onBuild: (entityId) => {
+                this.enterBuildMode(entityId);
+            },
+            getWorkersForBuilding: (buildingId) => {
+                return this.world.getWorkersForBuilding(buildingId);
+            },
+            initialWindowState: initialEntityDetailsWindowState ?? {
+                open: false,
+                minimized: false,
+                left: Math.max(16, window.innerWidth - 300),
+                top: 120,
+                width: 280,
+                height: 240,
+            },
+            onWindowStateChange: (state) => {
+                onEntityDetailsWindowStateChange?.(state);
+            },
+        });
+
+        this.buildPanel = createBuildPanel({
+            initialWindowState: this.initialBuildPanelState,
+            onWindowStateChange: (state) => {
+                this.initialBuildPanelState = state;
+                onBuildPanelStateChange?.(state);
+            },
+            onSelectionChange: (entityType) => {
+                if (this.buildMode) {
+                    this.buildMode.selectedBuildableType = entityType;
+                    this.updateBuildModeOverlay();
+                }
+            },
+            onClose: () => {
+                this.exitBuildMode();
+            },
+            getAvailableOre: this.getAvailableOre,
+        });
+
+        this.entityFooter = createEntityFooter({
+            onBuild: () => {
+                const entity = this.selectedEntityId ? this.world.getEntityById(this.selectedEntityId) : null;
+                if (entity) {
+                    this.enterBuildMode(entity.id);
+                }
+            },
+            onDeploy: () => {
+                const entity = this.selectedEntityId ? this.world.getEntityById(this.selectedEntityId) : null;
+                if (entity) {
+                    this.transport.send({ type: 'DeployWorker', workerId: entity.id });
+                }
+            },
+            onRecall: () => {
+                const entity = this.selectedEntityId ? this.world.getEntityById(this.selectedEntityId) : null;
+                if (entity) {
+                    this.transport.send({ type: 'RecallWorker', workerId: entity.id });
+                }
+            },
+            onRemoveQueuedCommand: (commandId) => {
+                const entity = this.selectedEntityId ? this.world.getEntityById(this.selectedEntityId) : null;
+                if (entity) {
+                    if (entity.kind === 'player') {
+                        this.transport.send({ type: 'RemoveQueuedPlayerCommand', commandId });
+                    } else {
+                        this.transport.send({ type: 'RemoveQueuedWorkerCommand', workerId: entity.id, commandId });
+                    }
+                }
+            },
+            onInterruptCurrentCommand: () => {
+                const entity = this.selectedEntityId ? this.world.getEntityById(this.selectedEntityId) : null;
+                if (entity) {
+                    if (entity.kind === 'player') {
+                        this.transport.send({ type: 'InterruptPlayerCommand' });
+                    } else if (entity.kind === 'worker') {
+                        this.transport.send({ type: 'InterruptWorkerCommand', workerId: entity.id });
+                    }
+                }
+            },
+            onTogglePauseCommands: () => {
+                const entity = this.selectedEntityId ? this.world.getEntityById(this.selectedEntityId) : null;
+                if (entity) {
+                    const paused = entity.commandsPaused ?? false;
+                    if (entity.kind === 'player') {
+                        this.transport.send({ type: paused ? 'ResumePlayerCommands' : 'PausePlayerCommands' });
+                    } else if (entity.kind === 'worker') {
+                        this.transport.send({ type: paused ? 'ResumeWorkerCommands' : 'PauseWorkerCommands', workerId: entity.id });
+                    }
+                }
+            },
+            onClearCommands: () => {
+                const entity = this.selectedEntityId ? this.world.getEntityById(this.selectedEntityId) : null;
+                if (entity?.kind === 'player') {
+                    this.transport.send({ type: 'ClearPlayerCommands' });
+                } else if (entity?.kind === 'worker') {
+                    this.transport.send({ type: 'ClearWorkerCommands', workerId: entity.id });
+                }
+            },
+        });
     }
 
-    getViewportWorldRectTiles(): WorldViewportRect {
+    public getViewportWorldRectTiles(): WorldViewportRect {
         const rect = this.viewportSpace.getWorldRect();
         return {
             left: rect.left / TILE_SIZE,
@@ -63,7 +220,7 @@ export class GameScene {
         };
     }
 
-    centerCameraOnTile(tileX: number, tileY: number): void {
+    public centerCameraOnTile(tileX: number, tileY: number): void {
         const screenCenter = this.viewportSpace.getScreenCenter();
         this.gameCamera.centerOnWorldAtStage(
             (tileX + 0.5) * TILE_SIZE,
@@ -74,11 +231,11 @@ export class GameScene {
         this.notifyCameraChanged();
     }
 
-    centerCameraOnBase(): void {
+    public centerCameraOnBase(): void {
         this.centerCameraOnTile(this.world.baseX, this.world.baseY);
     }
 
-    initialize(): void {
+    public initialize(): void {
         document.body.appendChild(this.worldContextMenu.getRoot());
         this.mountLayers();
         this.setupBackground();
@@ -91,17 +248,19 @@ export class GameScene {
 
         this.renderer.flushDirtyChunks(this.camera.scale.x);
         this.app.ticker.add(() => {
+            this.runFixedUpdates(this.app.ticker.deltaMS);
             this.world.ensureChunksForViewport(this.getViewportWorldRectTiles(), 1);
             this.renderer.flushDirtyChunks(this.camera.scale.x);
             this.updateHoldMining(this.app.ticker.deltaMS);
             this.updateDamagePopups(this.app.ticker.deltaMS);
+            this.updateBuildModeOverlay();
             if (this.debugOverlayEnabled) {
                 this.updateDebugOverlay();
             }
         });
     }
 
-    setDebugOverlayEnabled(enabled: boolean): void {
+    public setDebugOverlayEnabled(enabled: boolean): void {
         this.debugOverlayEnabled = enabled;
         this.screenOverlayLayer.visible = enabled;
         if (enabled) {
@@ -109,11 +268,11 @@ export class GameScene {
         }
     }
 
-    isDebugOverlayVisible(): boolean {
+    public isDebugOverlayVisible(): boolean {
         return this.debugOverlayEnabled;
     }
 
-    onCameraChanged(listener: () => void): () => void {
+    public onCameraChanged(listener: () => void): () => void {
         this.cameraChangedListeners.add(listener);
         return () => {
             this.cameraChangedListeners.delete(listener);
@@ -132,6 +291,22 @@ export class GameScene {
                 this.renderer.flushDirtyChunks(this.camera.scale.x);
             } else if (event.type === 'TileDamaged') {
                 this.spawnDamagePopups(event.hits);
+            } else if (event.type === 'EntityRemoved') {
+                if (this.selectedEntityId === event.id) {
+                    this.clearEntitySelection();
+                }
+            } else if (event.type === 'WorkerActionFailed' || event.type === 'WorkerSpawned' || event.type === 'WorkerDeployed' || event.type === 'WorkerRecalled' || event.type === 'WorkersRecalled' || event.type === 'WorkerMoved' || event.type === 'WorkerMiningStarted') {
+                this.refreshSelectedEntityDetails();
+            } else if (event.type === 'WorkerCommandInterrupted' || event.type === 'WorkerCommandsCleared' || event.type === 'WorkerQueuedCommandRemoved') {
+                this.refreshSelectedEntityDetails();
+            } else if (event.type === 'WorkerCommandsPaused' || event.type === 'WorkerCommandsResumed') {
+                this.refreshSelectedEntityDetails();
+            } else if (event.type === 'PlayerCommandInterrupted' || event.type === 'PlayerCommandsCleared' || event.type === 'PlayerQueuedCommandRemoved' || event.type === 'PlayerCommandsPaused' || event.type === 'PlayerCommandsResumed') {
+                this.refreshSelectedEntityDetails();
+            } else if (event.type === 'PlayerMoved') {
+                this.refreshSelectedEntityDetails();
+            } else if (event.type === 'WorldGenerated') {
+                this.clearEntitySelection();
             }
         });
     }
@@ -140,6 +315,7 @@ export class GameScene {
         this.camera.addChild(this.backgroundLayer);
         this.camera.addChild(this.worldLayer);
         this.camera.addChild(this.worldOverlayLayer);
+        this.camera.addChild(this.buildModeOverlay);
         this.camera.addChild(this.damageOverlayLayer);
 
         this.app.stage.addChild(this.camera);
@@ -226,6 +402,28 @@ export class GameScene {
 
     private onPointerDown(event: FederatedPointerEvent): void {
         if (event.button === 0) {
+            // Handle build mode placement
+            if (this.buildMode) {
+                // Only place if a buildable type is selected
+                if (this.buildMode.selectedBuildableType) {
+                    const worldPos = this.gameCamera.stageToWorld(event.global);
+                    const tx = Math.floor(worldPos.x / TILE_SIZE);
+                    const ty = Math.floor(worldPos.y / TILE_SIZE);
+                    if (this.buildMode.selectedBuildableType === 'beacon') {
+                        this.transport.send({ type: 'PlaceBeacon', x: tx, y: ty, builderEntityId: this.buildMode.builderEntityId });
+                    }
+                }
+                return;
+            }
+
+            const selected = this.selectEntityAtPointer(event.global);
+            if (selected) {
+                this.isPrimaryMining = false;
+                this.primaryHoldMineCooldownMs = 0;
+                return;
+            }
+
+            this.clearEntitySelection();
             this.isPrimaryMining = true;
             this.primaryMiningPointer.copyFrom(event.global);
             this.primaryHoldMineCooldownMs = 0;
@@ -243,6 +441,17 @@ export class GameScene {
     }
 
     private onPointerMove(event: FederatedPointerEvent): void {
+        // Update build mode preview position
+        if (this.buildMode) {
+            const worldPos = this.gameCamera.stageToWorld(event.global);
+            const tx = Math.floor(worldPos.x / TILE_SIZE);
+            const ty = Math.floor(worldPos.y / TILE_SIZE);
+            this.buildMode.previewX = tx;
+            this.buildMode.previewY = ty;
+            this.updateBuildModeOverlay();
+            return;
+        }
+
         if (this.isPrimaryMining) {
             this.primaryMiningPointer.copyFrom(event.global);
         }
@@ -337,6 +546,12 @@ export class GameScene {
     };
 
     private onCanvasAuxClick = (event: MouseEvent): void => {
+        // Cancel build mode on right-click
+        if (this.buildMode) {
+            this.exitBuildMode();
+            return;
+        }
+
         if (event.button === 1) {
             event.preventDefault();
         }
@@ -345,6 +560,11 @@ export class GameScene {
     private onCanvasContextMenu = (event: MouseEvent): void => {
         event.preventDefault();
 
+        // Don't show context menu in build mode
+        if (this.buildMode) {
+            return;
+        }
+
         const stagePoint = new Point();
         this.app.renderer.events.mapPositionToPoint(stagePoint, event.clientX, event.clientY);
         const worldPos = this.gameCamera.stageToWorld(stagePoint);
@@ -352,26 +572,197 @@ export class GameScene {
         const tileY = Math.floor(worldPos.y / TILE_SIZE);
 
         const tile = this.world.getTile(tileX, tileY);
-        const isExplored = tile && tile.visibility !== 'Unknown';
         const hasEnoughOre = this.getAvailableOre() >= 10;
-        const canPlaceBeacon = isExplored && hasEnoughOre;
+        const entity = this.world.getEntityAtTile(tileX, tileY);
+        const selectedEntity = this.selectedEntityId ? this.world.getEntityById(this.selectedEntityId) : null;
+
+        if (selectedEntity?.kind === 'worker') {
+            const mineableFrontier = !!tile && tile.solid && this.world.canWorkerMineTile(selectedEntity.id, tileX, tileY);
+            const canMoveHere = !!tile && selectedEntity.deployed && !tile.solid && tile.visibility !== 'Unknown' && (!(entity && entity.id !== selectedEntity.id));
+
+            const items = [] as Array<{
+                id: string;
+                label: string;
+                disabled?: boolean;
+                disabledReason?: string;
+                onSelect?: () => void;
+            }>;
+
+            if (canMoveHere) {
+                items.push({
+                    id: 'worker-move-here',
+                    label: 'Queue Move Here',
+                    onSelect: () => {
+                        this.transport.send({ type: 'MoveWorker', workerId: selectedEntity.id, x: tileX, y: tileY });
+                    },
+                });
+            }
+
+            if (mineableFrontier) {
+                items.push({
+                    id: 'worker-mine-here',
+                    label: 'Queue Mine Here',
+                    onSelect: () => {
+                        this.transport.send({ type: 'MineWorker', workerId: selectedEntity.id, x: tileX, y: tileY });
+                    },
+                });
+            }
+
+            items.push(
+                {
+                    id: 'worker-interrupt-command',
+                    label: 'Interrupt Current Command',
+                    onSelect: () => {
+                        this.transport.send({ type: 'InterruptWorkerCommand', workerId: selectedEntity.id });
+                    },
+                },
+                {
+                    id: 'worker-clear-commands',
+                    label: 'Clear Command Queue',
+                    onSelect: () => {
+                        this.transport.send({ type: 'ClearWorkerCommands', workerId: selectedEntity.id });
+                    },
+                },
+            );
+
+            if (items.length > 0) {
+                this.worldContextMenu.open({
+                    x: event.clientX,
+                    y: event.clientY,
+                    items,
+                });
+                return;
+            }
+        }
+
+        if (entity?.kind === 'worker' && entity.deployed) {
+            this.worldContextMenu.open({
+                x: event.clientX,
+                y: event.clientY,
+                items: [
+                    {
+                        id: 'worker-return-to-base',
+                        label: 'Return Worker To Base',
+                        onSelect: () => {
+                            this.transport.send({ type: 'RecallWorker', workerId: entity.id });
+                        },
+                    },
+                ],
+            });
+            return;
+        }
+
+        const items: Array<{
+            id: string;
+            label: string;
+            disabled?: boolean;
+            disabledReason?: string;
+            submenuDirection?: 'right' | 'up';
+            onSelect?: () => void;
+            children?: Array<{
+                id: string;
+                label: string;
+                disabled?: boolean;
+                disabledReason?: string;
+                onSelect?: () => void;
+            }>;
+        }> = [];
+
+        if (selectedEntity?.kind === 'player') {
+            items.push({
+                id: 'player-actions-menu',
+                label: 'Player Actions',
+                submenuDirection: 'up',
+                children: [
+                    {
+                        id: 'player-walk-here',
+                        label: 'Walk Here',
+                        disabled: !tile || tile.solid || tile.visibility === 'Unknown',
+                        disabledReason: !tile
+                            ? 'Out of world bounds'
+                            : tile.solid
+                                ? 'Target tile is blocked'
+                                : tile.visibility === 'Unknown'
+                                    ? 'Target tile is unexplored'
+                                    : undefined,
+                        onSelect: () => {
+                            this.transport.send({ type: 'MovePlayer', x: tileX, y: tileY });
+                        },
+                    },
+                ],
+            });
+        }
+
+        if (items.length === 0) {
+            return;
+        }
 
         this.worldContextMenu.open({
             x: event.clientX,
             y: event.clientY,
-            items: [
-                {
-                    id: 'place-beacon',
-                    label: 'Add Beacon',
-                    disabled: !canPlaceBeacon,
-                    disabledReason: !isExplored ? 'Area not explored' : !hasEnoughOre ? 'Need 10 ore' : undefined,
-                    onSelect: () => {
-                        this.transport.send({ type: 'PlaceBeacon', x: tileX, y: tileY });
-                    },
-                },
-            ],
+            items,
         });
     };
+
+    private selectEntityAtPointer(pointer: Point): WorldEntity | null {
+        const worldPos = this.gameCamera.stageToWorld(pointer);
+        const tileX = Math.floor(worldPos.x / TILE_SIZE);
+        const tileY = Math.floor(worldPos.y / TILE_SIZE);
+        const entity = this.world.getEntityAtTile(tileX, tileY);
+        if (!entity) return null;
+
+        this.selectedEntityId = entity.id;
+        this.renderer.setSelectedEntity(entity.id);
+        this.entityDetails.openForEntity(entity);
+        this.entityFooter.setEntity(entity);
+        this.entityFooter.show();
+        return entity;
+    }
+
+    private clearEntitySelection(): void {
+        if (!this.selectedEntityId) return;
+        this.selectedEntityId = null;
+        this.renderer.setSelectedEntity(null);
+        this.entityDetails.close();
+        this.entityDetails.clearSelection();
+        this.entityFooter.setEntity(null);
+        this.entityFooter.hide();
+    }
+
+    private refreshSelectedEntityDetails(): void {
+        if (!this.selectedEntityId) return;
+        const selected = this.world.getEntityById(this.selectedEntityId);
+        if (!selected) {
+            this.clearEntitySelection();
+            return;
+        }
+        this.entityDetails.openForEntity(selected);
+        this.entityFooter.setEntity(selected);
+    }
+
+    private runFixedUpdates(deltaMs: number): void {
+        this.fixedUpdateAccumulatorMs += deltaMs;
+        let steps = 0;
+
+        while (this.fixedUpdateAccumulatorMs >= GameScene.FIXED_STEP_MS && steps < GameScene.MAX_FIXED_STEPS_PER_FRAME) {
+            this.world.tickFixed(GameScene.FIXED_STEP_MS);
+            const damageHits = this.world.drainWorkerDamageHits();
+            if (damageHits.length > 0) {
+                this.spawnDamagePopups(damageHits);
+            }
+            const deliveries = this.world.drainWorkerOreDeliveries();
+            if (deliveries.length > 0) {
+                const totalOre = deliveries.reduce((sum, delivery) => sum + delivery.amount, 0);
+                this.onWorkerOreDelivered(totalOre);
+            }
+            this.fixedUpdateAccumulatorMs -= GameScene.FIXED_STEP_MS;
+            steps++;
+        }
+
+        if (steps === GameScene.MAX_FIXED_STEPS_PER_FRAME) {
+            this.fixedUpdateAccumulatorMs = Math.min(this.fixedUpdateAccumulatorMs, GameScene.FIXED_STEP_MS);
+        }
+    }
 
     private onWheelZoom = (event: WheelEvent): void => {
         event.preventDefault();
@@ -386,5 +777,68 @@ export class GameScene {
         const stagePoint = new Point();
         this.app.renderer.events.mapPositionToPoint(stagePoint, event.clientX, event.clientY);
         return stagePoint;
+    }
+
+    private enterBuildMode(entityId: string): void {
+        const entity = this.world.getEntityById(entityId);
+        if (!entity || !entity.builder || !entity.builder.buildables.includes('beacon')) {
+            return;
+        }
+
+        // Pause any active walking by pausing the movement
+        if (entity.movement && entity.movement.mode === 'move') {
+            this.pausedWalkingEntityId = entityId;
+            // The movement will remain until the command resumes or the next action
+        }
+
+        // Enter build mode
+        this.buildMode = {
+            builderEntityId: entityId,
+            selectedBuildableType: null,
+            previewX: entity.x,
+            previewY: entity.y,
+        };
+        this.buildPanel?.setOpen(true);
+        this.updateBuildModeOverlay();
+    }
+
+    private exitBuildMode(): void {
+        this.buildMode = null;
+        this.buildModeOverlay.clear();
+        this.buildPanel?.setOpen(false);
+        this.pausedWalkingEntityId = null;
+    }
+
+    private updateBuildModeOverlay(): void {
+        this.buildModeOverlay.clear();
+
+        if (!this.buildMode) return;
+
+        const builder = this.world.getEntityById(this.buildMode.builderEntityId);
+        if (!builder || !builder.builder) return;
+
+        // Get all buildable tiles for the entity (currently only beacon type is supported)
+        const buildableTiles = this.world.getBuildableTilesForEntity(this.buildMode.builderEntityId, 'beacon');
+
+        // Draw range highlighting
+        for (const tile of buildableTiles) {
+            const px = tile.x * TILE_SIZE;
+            const py = tile.y * TILE_SIZE;
+            this.buildModeOverlay.rect(px, py, TILE_SIZE, TILE_SIZE).fill({ color: 0x6366f1, alpha: 0.15 });
+            this.buildModeOverlay.rect(px, py, TILE_SIZE, TILE_SIZE).stroke({ color: 0x6366f1, width: 1, alpha: 0.3 });
+        }
+
+        // Draw entity preview at mouse position (only if a buildable type is selected)
+        if (this.buildMode.selectedBuildableType) {
+            const previewX = this.buildMode.previewX * TILE_SIZE;
+            const previewY = this.buildMode.previewY * TILE_SIZE;
+            const failureReason = this.world.getBeaconPlacementFailureReason(this.buildMode.previewX, this.buildMode.previewY, this.buildMode.builderEntityId);
+            const isValid = failureReason === 'unknown_tile';
+            const previewColor = isValid ? 0x10b981 : 0xef4444;
+            const previewAlpha = isValid ? 0.4 : 0.3;
+
+            this.buildModeOverlay.rect(previewX, previewY, TILE_SIZE, TILE_SIZE).fill({ color: previewColor, alpha: previewAlpha });
+            this.buildModeOverlay.rect(previewX, previewY, TILE_SIZE, TILE_SIZE).stroke({ color: previewColor, width: 2, alpha: 0.7 });
+        }
     }
 }
