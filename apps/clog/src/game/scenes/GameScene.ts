@@ -103,8 +103,8 @@ export class GameScene {
             onDeleteBeacon: (entityId) => {
                 this.transport.send({ type: 'RemoveBeacon', entityId });
             },
-            onSpawnWorker: (buildingId) => {
-                this.transport.send({ type: 'SpawnWorker', buildingId });
+            onSpawnUnit: (buildingId, unitType) => {
+                this.transport.send({ type: 'SpawnUnit', buildingId, unitType });
             },
             onDeployWorker: (workerId) => {
                 this.transport.send({ type: 'DeployWorker', workerId });

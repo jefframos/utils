@@ -1,12 +1,14 @@
-import type { WorkerEntityCommandList, WorldEntity } from '../world/WorldModel';
+import type { WorkerEntityCommandList, WorkerUnitType, WorldEntity } from '../world/WorldModel';
 import { createFloatingWindow } from './FloatingWindow';
 import type { EntityDetailsWindowMeta } from '../meta/GameMetaStore';
 import type { InventoryItemDefinition, InventoryItemInstance, InventoryLocation } from '../inventory/ItemDefinitions';
 import { canPlaceAt, getInventoryItemDefinition, moveItemWithRules, type InventoryState } from '../inventory/InventoryModel';
+import { WORKER_DEFINITIONS } from '../content/workers';
+import { getEntityLabel, getEntitySummary } from '../content/entityDefinitions';
 
 type EntityDetailsWindowOptions = {
     onDeleteBeacon: (entityId: string) => void;
-    onSpawnWorker: (buildingId: string) => void;
+    onSpawnUnit: (buildingId: string, unitType: WorkerUnitType) => void;
     onDeployWorker: (workerId: string) => void;
     onRecallWorker: (workerId: string) => void;
     onRecallAllWorkers: (buildingId: string) => void;
@@ -191,7 +193,9 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
 
             const label = document.createElement('div');
             label.className = 'entity-worker-label';
-            label.textContent = worker.unitType === 'basic-worker' ? 'Basic Worker' : 'Worker';
+            label.textContent = worker.viewDef?.icon
+                ? `${worker.viewDef.icon} ${getEntityLabel(worker.kind, worker.unitType)}`
+                : getEntityLabel(worker.kind, worker.unitType);
 
             const status = document.createElement('div');
             status.className = 'entity-worker-status';
@@ -224,12 +228,10 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
         baseWorkersTitle.textContent = `Workers (${workers.length})`;
 
         setActions([
-            {
-                label: 'Spawn Basic Worker',
-                onClick: () => {
-                    options.onSpawnWorker(baseEntity.id);
-                },
-            },
+            ...Object.values(WORKER_DEFINITIONS).map((def) => ({
+                label: `Spawn ${def.name}`,
+                onClick: () => { options.onSpawnUnit(baseEntity.id, def.id); },
+            })),
             {
                 label: 'Recall All Workers',
                 onClick: () => {
@@ -515,27 +517,14 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
     return {
         openForEntity: (entity) => {
             currentEntity = entity;
-            const entityLabel = entity.kind === 'base'
-                ? 'Space Station'
-                : entity.kind === 'beacon'
-                    ? 'Beacon'
-                    : entity.kind === 'player'
-                        ? 'Hero'
-                        : 'Worker';
-            name.textContent = entityLabel;
-            if (entity.kind === 'base') {
-                summary.textContent = 'Main operations hub. Spawn and manage workers attached to this station.';
-            } else if (entity.kind === 'beacon') {
-                summary.textContent = 'Remote visibility anchor. Remove it to reclaim part of the build cost.';
-            } else if (entity.kind === 'player') {
-                summary.textContent = 'Main hero unit. Holds primary tools and inventory for this run.';
-            } else {
-                summary.textContent = 'Basic worker unit. Can be deployed in the field or recalled to home base.';
-            }
+            name.textContent = entity.viewDef?.icon
+                ? `${entity.viewDef.icon}  ${getEntityLabel(entity.kind, entity.unitType)}`
+                : getEntityLabel(entity.kind, entity.unitType);
+            summary.textContent = getEntitySummary(entity.kind, entity.unitType);
 
             setRows([
                 ['ID', entity.id],
-                ['Position', `${entity.x}, ${entity.y}`],
+                ['Position', `${Math.round(entity.x)}, ${Math.round(entity.y)}`],
                 ['Visibility', `${entity.visibilityRadius} tiles`],
             ]);
             meta.hidden = false;

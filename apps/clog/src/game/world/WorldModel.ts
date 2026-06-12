@@ -1,7 +1,8 @@
 ﻿import { BASE_START_X, BASE_START_Y, CHUNK_SIZE, GAME_RULES, WORLD_HEIGHT, WORLD_WIDTH } from '../config';
 import { BIOME_DEFINITIONS } from '../content/biomes';
 import { carveOpen, createHiddenSpaceTile, createSolidTile, damageTile } from '../content/tiles';
-import { getWorkerDefinition } from '../content/workers';
+import { getWorkerDefinition, type WorkerUnitType } from '../content/workers';
+import { getEntityDefinition, type EntitySizeDef, type EntityViewDef } from '../content/entityDefinitions';
 import { CommandListComponent, type CommandListState, type EnqueueMode } from '../core/CommandListComponent';
 import { getToolDefinition } from '../core/ToolComponent';
 import type { TileDamageHit } from '../core/protocol.ts';
@@ -27,7 +28,9 @@ export type SavedTile = {
 
 export type WorldEntityKind = 'base' | 'beacon' | 'worker' | 'player';
 export type WorldEntityMobility = 'static' | 'dynamic';
-export type WorkerUnitType = 'basic-worker';
+export type { WorkerUnitType } from '../content/workers';
+
+export type { EntitySizeDef, EntityViewDef } from '../content/entityDefinitions';
 
 export type EntityWalkingDefinition = {
     speedTilesPerSecond: number;
@@ -81,10 +84,15 @@ export type WorldEntity = {
     mining?: WorkerMiningState | null;
     commandList?: WorkerEntityCommandList | PlayerEntityCommandList | null;
     commandsPaused?: boolean;
+    commandRetryCooldownMs?: number;
     walking?: EntityWalkingDefinition;
     builder?: EntityBuilderDefinition;
     miningDef?: EntityMiningDefinition;
     inventoryDef?: EntityInventoryDefinition;
+    /** Physical footprint. Drives collision, pathfinding clearance, and deployment checks. */
+    sizeDef?: EntitySizeDef;
+    /** Visual presentation. Drives rendering tint, icon, and future sprite reference. */
+    viewDef?: EntityViewDef;
 };
 
 export type WorkerMovementState = {
@@ -321,26 +329,21 @@ export class WorldModel {
     }
 
     getEntityAtTile(x: number, y: number): WorldEntity | null {
-        const player = this.getMainPlayerEntity();
-        if (player && Math.round(player.x) === x && Math.round(player.y) === y) {
-            return player;
-        }
-
+        // Prioritize dynamic/smaller entities before large static backdrops like the base.
+        let baseMatch: WorldEntity | null = null;
         for (const entity of this.entities.values()) {
-            if (entity.kind === 'worker' && entity.deployed === true && Math.round(entity.x) === x && Math.round(entity.y) === y) {
-                return entity;
+            if (entity.kind === 'worker' && entity.deployed !== true) continue;
+            if (entity.kind === 'base') {
+                if (Math.abs(entity.x - x) <= 2 && Math.abs(entity.y - y) <= 2) baseMatch = entity;
+                continue;
             }
-            if (entity.kind === 'beacon' && entity.x === x && entity.y === y) {
-                return entity;
-            }
+            const sizeX = entity.sizeDef?.tilesX ?? 1;
+            const sizeY = entity.sizeDef?.tilesY ?? 1;
+            const ex = Math.round(entity.x);
+            const ey = Math.round(entity.y);
+            if (x >= ex && x < ex + sizeX && y >= ey && y < ey + sizeY) return entity;
         }
-
-        const base = this.getBaseEntity();
-        if (base && Math.abs(base.x - x) <= 2 && Math.abs(base.y - y) <= 2) {
-            return base;
-        }
-
-        return null;
+        return baseMatch;
     }
 
     getWorkersForBuilding(buildingId: string): ReadonlyArray<WorldEntity> {
@@ -422,6 +425,8 @@ export class WorldModel {
                 const normalizedEntity: WorldEntity = { ...entity };
                 if (normalizedEntity.kind === 'beacon') {
                     normalizedEntity.visibilityRadius = BEACON_VISIBILITY_RADIUS;
+                    normalizedEntity.sizeDef = getEntityDefinition('beacon').sizeDef;
+                    normalizedEntity.viewDef = getEntityDefinition('beacon').viewDef;
                 } else if (normalizedEntity.kind === 'player') {
                     normalizedEntity.visibilityRadius = PLAYER_VISIBILITY_RADIUS;
                     normalizedEntity.mobility = 'dynamic';
@@ -446,8 +451,12 @@ export class WorldModel {
                     normalizedEntity.toolId = normalizedEntity.toolId ?? 'starter-cutter';
                     normalizedEntity.minePower = normalizedEntity.minePower ?? normalizedEntity.miningDef.minePower;
                     normalizedEntity.mineCooldownMs = normalizedEntity.mineCooldownMs ?? normalizedEntity.miningDef.mineCooldownMs;
+                    normalizedEntity.sizeDef = getEntityDefinition('player').sizeDef;
+                    normalizedEntity.viewDef = getEntityDefinition('player').viewDef;
                 } else if (normalizedEntity.kind === 'worker') {
-                    const definition = getWorkerDefinition(normalizedEntity.unitType ?? 'basic-worker');
+                    const unitType: WorkerUnitType = normalizedEntity.unitType === 'large-worker' ? 'large-worker' : 'basic-worker';
+                    const definition = getWorkerDefinition(unitType);
+                    normalizedEntity.unitType = unitType;
                     normalizedEntity.visibilityRadius = definition.visibilityRadius;
                     normalizedEntity.hp = normalizedEntity.hp ?? definition.maxHp;
                     normalizedEntity.maxHp = normalizedEntity.maxHp ?? definition.maxHp;
@@ -467,7 +476,7 @@ export class WorldModel {
                         carryCapacity: normalizedEntity.carryCapacity,
                     };
                     normalizedEntity.inventoryDef = normalizedEntity.inventoryDef ?? {
-                        capacity: 1,
+                        capacity: definition.inventoryCapacity,
                     };
                     const commandListComponent = new CommandListComponent<WorkerEntityCommandType, WorkerEntityCommandPayload>(normalizedEntity.commandList as WorkerEntityCommandList ?? undefined);
                     normalizedEntity.commandList = commandListComponent.snapshot();
@@ -477,6 +486,8 @@ export class WorldModel {
                         normalizedEntity.mining.lastMinedX = normalizedEntity.mining.lastMinedX ?? normalizedEntity.mining.targetX;
                         normalizedEntity.mining.lastMinedY = normalizedEntity.mining.lastMinedY ?? normalizedEntity.mining.targetY;
                     }
+                    normalizedEntity.sizeDef = getEntityDefinition('worker', unitType).sizeDef;
+                    normalizedEntity.viewDef = getEntityDefinition('worker', unitType).viewDef;
                 }
 
                 this.entities.set(normalizedEntity.id, normalizedEntity);
@@ -659,7 +670,11 @@ export class WorldModel {
         return { ok: true, beacon: { ...removedBeacon } };
     }
 
-    spawnWorkerAtBuilding(buildingId: string): WorkerActionResult {
+    spawnUnitAtBuilding(buildingId: string, unitType: WorkerUnitType): WorkerActionResult {
+        return this.spawnWorkerOfTypeAtBuilding(buildingId, unitType);
+    }
+
+    private spawnWorkerOfTypeAtBuilding(buildingId: string, unitType: WorkerUnitType): WorkerActionResult {
         const building = this.entities.get(buildingId);
         if (!building) {
             return { ok: false, reason: 'not_found' };
@@ -668,7 +683,7 @@ export class WorldModel {
             return { ok: false, reason: 'invalid_building' };
         }
 
-        const definition = getWorkerDefinition('basic-worker');
+        const definition = getWorkerDefinition(unitType);
         const workerId = `entity-worker-${this.nextWorkerIndex++}`;
         const worker: WorldEntity = {
             id: workerId,
@@ -678,7 +693,7 @@ export class WorldModel {
             y: building.y,
             visibilityRadius: definition.visibilityRadius,
             parentId: buildingId,
-            unitType: 'basic-worker',
+            unitType,
             homeId: buildingId,
             deployed: false,
             hp: definition.maxHp,
@@ -698,8 +713,10 @@ export class WorldModel {
                 carryCapacity: definition.carryCapacity,
             },
             inventoryDef: {
-                capacity: 1,
+                capacity: definition.inventoryCapacity,
             },
+            sizeDef: getEntityDefinition('worker', unitType).sizeDef,
+            viewDef: getEntityDefinition('worker', unitType).viewDef,
             commandList: CommandListComponent.createEmpty<WorkerEntityCommandType, WorkerEntityCommandPayload>(),
         };
 
@@ -725,7 +742,7 @@ export class WorldModel {
             return { ok: false, reason: 'invalid_building' };
         }
 
-        const tile = this.findDeploymentTile(home);
+        const tile = this.findDeploymentTile(home, worker.sizeDef, worker.id);
         if (!tile) {
             return { ok: false, reason: 'no_deploy_space' };
         }
@@ -764,10 +781,10 @@ export class WorldModel {
             if (!entity.deployed) continue;
             this.clearWorkerCommands(entity.id);
             this.clearWorkerMining(entity);
-            const returnTarget = this.findNearestDropoffTile(building, entity.x, entity.y);
+            const returnTarget = this.findNearestDropoffTile(building, entity.x, entity.y, entity.sizeDef, entity.id);
             if (!returnTarget) continue;
 
-            const path = this.findOpenPath(entity.x, entity.y, returnTarget.x, returnTarget.y, 15000);
+            const path = this.findOpenPath(entity.x, entity.y, returnTarget.x, returnTarget.y, 15000, entity.sizeDef);
             if (!path) continue;
 
             if (path.length <= 1) {
@@ -827,16 +844,7 @@ export class WorldModel {
         const entity = this.entities.get(entityId);
         if (!entity) return false;
 
-        this.ensureWorldContainsTile(x, y);
-        const tile = this.getTile(x, y);
-        if (!tile || tile.solid || tile.visibility === 'Unknown') {
-            return false;
-        }
-        if (this.isEntityOccupied(x, y, entity.id)) {
-            return false;
-        }
-
-        return true;
+        return this.findBestFitAnchorForSelectedTile(entity, x, y) !== null;
     }
 
     canEntityMineTile(entityId: string, x: number, y: number): boolean {
@@ -959,19 +967,12 @@ export class WorldModel {
     private beginMoveWorkerTo(worker: WorldEntity, x: number, y: number): WorkerActionResult {
         this.clearWorkerMining(worker);
 
-        this.ensureWorldContainsTile(x, y);
-        const targetTile = this.getTile(x, y);
-        if (!targetTile || targetTile.solid || targetTile.visibility === 'Unknown') {
-            return { ok: false, reason: 'invalid_target' };
-        }
-        if (this.isEntityOccupied(x, y, worker.id)) {
-            return { ok: false, reason: 'invalid_target' };
-        }
-
-        const path = this.findOpenPath(worker.x, worker.y, x, y, 15000);
-        if (!path) {
+        const bestFit = this.findBestFitMoveTarget(worker, x, y, 15000);
+        if (!bestFit) {
             return { ok: false, reason: 'path_blocked' };
         }
+
+        const { path } = bestFit;
 
         if (path.length <= 1) {
             worker.movement = null;
@@ -1068,12 +1069,12 @@ export class WorldModel {
             return { ok: false, reason: 'invalid_building' };
         }
 
-        const returnTarget = this.findNearestDropoffTile(home, worker.x, worker.y);
+        const returnTarget = this.findNearestDropoffTile(home, worker.x, worker.y, worker.sizeDef, worker.id);
         if (!returnTarget) {
             return { ok: false, reason: 'no_deploy_space' };
         }
 
-        const path = this.findOpenPath(worker.x, worker.y, returnTarget.x, returnTarget.y, 15000);
+        const path = this.findOpenPath(worker.x, worker.y, returnTarget.x, returnTarget.y, 15000, worker.sizeDef);
         if (!path) {
             return { ok: false, reason: 'path_blocked' };
         }
@@ -1105,6 +1106,10 @@ export class WorldModel {
             if (entity.kind !== 'worker') continue;
             const previousX = entity.x;
             const previousY = entity.y;
+
+            if ((entity.commandRetryCooldownMs ?? 0) > 0) {
+                entity.commandRetryCooldownMs = Math.max(0, (entity.commandRetryCooldownMs ?? 0) - deltaMs);
+            }
 
             this.tryStartNextEntityCommand(entity);
 
@@ -1139,7 +1144,7 @@ export class WorldModel {
 
                     if (entity.movement.mode === 'return' && entity.movement.homeId) {
                         const home = this.entities.get(entity.movement.homeId);
-                        if (home && this.isInBaseDropoffZone(home, entity.x, entity.y)) {
+                        if (home && this.isInBaseDropoffZone(home, entity.x, entity.y, entity.sizeDef)) {
                             entity.movement.stepIndex = entity.movement.path.length;
                             break;
                         }
@@ -1261,11 +1266,10 @@ export class WorldModel {
                         } else if (entity.mining.cooldownMs > 0) {
                             entity.mining.cooldownMs = Math.max(0, entity.mining.cooldownMs - deltaMs);
                         } else {
-                            // Calculate available capacity for proportional damage.
-                            // Treat inventory slots as ore stacks (99 each) and respect larger explicit carry limits.
+                            // Each inventory slot can hold up to ORE_UNITS_PER_SLOT ore.
                             const inventorySlots = Math.max(1, entity.inventoryDef?.capacity ?? 1);
-                            const configuredCarryLimit = Math.max(1, entity.miningDef?.carryCapacity ?? entity.carryCapacity ?? ORE_UNITS_PER_SLOT);
-                            const totalCapacity = Math.max(configuredCarryLimit, inventorySlots * ORE_UNITS_PER_SLOT);
+                            const perSlotCap = Math.max(1, entity.miningDef?.carryCapacity ?? ORE_UNITS_PER_SLOT);
+                            const totalCapacity = inventorySlots * perSlotCap;
                             const carried = entity.mining.carriedOre ?? 0;
                             const availableCapacity = Math.max(0, totalCapacity - carried);
 
@@ -1308,9 +1312,9 @@ export class WorldModel {
                                 if (inventoryNowFull) {
                                     const home = entity.mining.homeId ? this.entities.get(entity.mining.homeId) : null;
                                     if (home) {
-                                        const returnTarget = this.findNearestDropoffTile(home, entity.x, entity.y);
+                                        const returnTarget = this.findNearestDropoffTile(home, entity.x, entity.y, entity.sizeDef, entity.id);
                                         if (returnTarget) {
-                                            const path = this.findOpenPath(entity.x, entity.y, returnTarget.x, returnTarget.y, 15000);
+                                            const path = this.findOpenPath(entity.x, entity.y, returnTarget.x, returnTarget.y, 15000, entity.sizeDef);
                                             if (path) {
                                                 entity.movement = {
                                                     path,
@@ -1358,9 +1362,9 @@ export class WorldModel {
                                             // No more targets nearby - return home with collected ore
                                             const home = entity.mining.homeId ? this.entities.get(entity.mining.homeId) : null;
                                             if (home && entity.mining.carriedOre > 0) {
-                                                const returnTarget = this.findNearestDropoffTile(home, entity.x, entity.y);
+                                                const returnTarget = this.findNearestDropoffTile(home, entity.x, entity.y, entity.sizeDef, entity.id);
                                                 if (returnTarget) {
-                                                    const path = this.findOpenPath(entity.x, entity.y, returnTarget.x, returnTarget.y, 15000);
+                                                    const path = this.findOpenPath(entity.x, entity.y, returnTarget.x, returnTarget.y, 15000, entity.sizeDef);
                                                     if (path) {
                                                         entity.movement = {
                                                             path,
@@ -1393,6 +1397,10 @@ export class WorldModel {
         if (player) {
             const previousX = player.x;
             const previousY = player.y;
+
+            if ((player.commandRetryCooldownMs ?? 0) > 0) {
+                player.commandRetryCooldownMs = Math.max(0, (player.commandRetryCooldownMs ?? 0) - deltaMs);
+            }
 
             if (!player.commandsPaused && player.movement) {
                 const movementMode = player.movement.mode;
@@ -2542,6 +2550,8 @@ export class WorldModel {
             inventoryDef: {
                 capacity: 48,
             },
+            sizeDef: getEntityDefinition('base').sizeDef,
+            viewDef: getEntityDefinition('base').viewDef,
         });
     }
 
@@ -2565,6 +2575,8 @@ export class WorldModel {
     }
 
     private ensureMainPlayerEntity(): void {
+        const base = this.getBaseEntity();
+        const playerSpawn = base ? this.findDeploymentTile(base, getEntityDefinition('player').sizeDef, MAIN_PLAYER_ENTITY_ID) : null;
         const existing = this.entities.get(MAIN_PLAYER_ENTITY_ID);
         if (existing) {
             existing.x = Math.round(existing.x);
@@ -2593,6 +2605,14 @@ export class WorldModel {
             existing.toolId = existing.toolId ?? 'starter-cutter';
             existing.minePower = existing.minePower ?? existing.miningDef.minePower;
             existing.mineCooldownMs = existing.mineCooldownMs ?? existing.miningDef.mineCooldownMs;
+            existing.sizeDef = getEntityDefinition('player').sizeDef;
+            existing.viewDef = getEntityDefinition('player').viewDef;
+            if (base && this.isBaseFootprintOverlappingEntity(base, existing)) {
+                const fallbackX = playerSpawn?.x ?? this.baseXValue + 3;
+                const fallbackY = playerSpawn?.y ?? this.baseYValue;
+                existing.x = fallbackX;
+                existing.y = fallbackY;
+            }
             return;
         }
 
@@ -2600,8 +2620,8 @@ export class WorldModel {
             id: MAIN_PLAYER_ENTITY_ID,
             kind: 'player',
             mobility: 'dynamic',
-            x: this.baseXValue,
-            y: this.baseYValue,
+            x: playerSpawn?.x ?? this.baseXValue + 3,
+            y: playerSpawn?.y ?? this.baseYValue,
             visibilityRadius: PLAYER_VISIBILITY_RADIUS,
             moveSpeedTilesPerSecond: PLAYER_MOVE_SPEED_TILES_PER_SECOND,
             parentId: null,
@@ -2624,7 +2644,24 @@ export class WorldModel {
                 mineCooldownMs: 160,
                 carryCapacity: 999,
             },
+            sizeDef: getEntityDefinition('player').sizeDef,
+            viewDef: getEntityDefinition('player').viewDef,
         });
+    }
+
+    private isBaseFootprintOverlappingEntity(base: WorldEntity, entity: WorldEntity): boolean {
+        const sizeX = Math.max(1, entity.sizeDef?.tilesX ?? 1);
+        const sizeY = Math.max(1, entity.sizeDef?.tilesY ?? 1);
+        const startX = Math.round(entity.x);
+        const startY = Math.round(entity.y);
+        for (let dy = 0; dy < sizeY; dy++) {
+            for (let dx = 0; dx < sizeX; dx++) {
+                if (Math.abs(startX + dx - base.x) <= 2 && Math.abs(startY + dy - base.y) <= 2) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private getMainPlayerEntity(): WorldEntity | null {
@@ -2685,15 +2722,34 @@ export class WorldModel {
         return this.getMainPlayerEntity();
     }
 
-    private findOpenPath(fromX: number, fromY: number, toX: number, toY: number, maxSteps: number): Array<{ x: number; y: number }> | null {
+    private findOpenPath(
+        fromX: number,
+        fromY: number,
+        toX: number,
+        toY: number,
+        maxSteps: number,
+        sizeDef?: { tilesX: number; tilesY: number },
+    ): Array<{ x: number; y: number }> | null {
         fromX = Math.round(fromX);
         fromY = Math.round(fromY);
         toX = Math.round(toX);
         toY = Math.round(toY);
 
-        const startTile = this.getTile(fromX, fromY);
-        const targetTile = this.getTile(toX, toY);
-        if (!startTile || !targetTile || startTile.solid || targetTile.solid) return null;
+        const sw = sizeDef?.tilesX ?? 1;
+        const sh = sizeDef?.tilesY ?? 1;
+
+        /** Returns true when all tiles of the entity footprint anchored at (x,y) are walkable. */
+        const canStand = (x: number, y: number): boolean => {
+            for (let dy = 0; dy < sh; dy++) {
+                for (let dx = 0; dx < sw; dx++) {
+                    const t = this.getTile(x + dx, y + dy);
+                    if (!t || t.solid) return false;
+                }
+            }
+            return true;
+        };
+
+        if (!canStand(fromX, fromY) || !canStand(toX, toY)) return null;
 
         const queue: Array<{ x: number; y: number }> = [{ x: fromX, y: fromY }];
         const previous = new Map<string, string | null>();
@@ -2719,8 +2775,7 @@ export class WorldModel {
                 const ny = current.y + oy;
                 const key = `${nx},${ny}`;
                 if (previous.has(key)) continue;
-                const nextTile = this.getTile(nx, ny);
-                if (!nextTile || nextTile.solid) continue;
+                if (!canStand(nx, ny)) continue;
                 previous.set(key, `${current.x},${current.y}`);
                 queue.push({ x: nx, y: ny });
             }
@@ -2767,9 +2822,9 @@ export class WorldModel {
         return points;
     }
 
-    private findDeploymentTile(building: WorldEntity): { x: number; y: number } | null {
+    private findDeploymentTile(building: WorldEntity, sizeDef?: EntitySizeDef, ignoreEntityId?: string): { x: number; y: number } | null {
         const minRadius = building.kind === 'base' ? 3 : 2;
-        const maxRadius = 12;
+        const maxRadius = 14;
 
         for (let radius = minRadius; radius <= maxRadius; radius++) {
             for (let oy = -radius; oy <= radius; oy++) {
@@ -2777,10 +2832,8 @@ export class WorldModel {
                     if (Math.max(Math.abs(ox), Math.abs(oy)) !== radius) continue;
                     const tx = building.x + ox;
                     const ty = building.y + oy;
-                    const tile = this.getTile(tx, ty);
-                    if (!tile || tile.solid || tile.visibility === 'Unknown') continue;
                     if (building.kind === 'base' && Math.abs(tx - building.x) <= 2 && Math.abs(ty - building.y) <= 2) continue;
-                    if (this.isEntityOccupied(tx, ty)) continue;
+                    if (!this.isFootprintClearAt(tx, ty, sizeDef, ignoreEntityId)) continue;
                     return { x: tx, y: ty };
                 }
             }
@@ -2789,17 +2842,116 @@ export class WorldModel {
         return null;
     }
 
+    private isFootprintClearAt(anchorX: number, anchorY: number, sizeDef: EntitySizeDef | undefined, ignoreEntityId?: string): boolean {
+        const sizeX = Math.max(1, sizeDef?.tilesX ?? 1);
+        const sizeY = Math.max(1, sizeDef?.tilesY ?? 1);
+
+        for (let dy = 0; dy < sizeY; dy++) {
+            for (let dx = 0; dx < sizeX; dx++) {
+                const tx = anchorX + dx;
+                const ty = anchorY + dy;
+                if (!this.isInBounds(tx, ty)) return false;
+                const tile = this.getTile(tx, ty);
+                if (!tile || tile.solid || tile.visibility === 'Unknown') return false;
+                if (this.isEntityOccupied(tx, ty, ignoreEntityId)) return false;
+            }
+        }
+
+        return true;
+    }
+
+    private footprintTouchesTile(anchorX: number, anchorY: number, sizeDef: EntitySizeDef | undefined, targetX: number, targetY: number): boolean {
+        const sizeX = Math.max(1, sizeDef?.tilesX ?? 1);
+        const sizeY = Math.max(1, sizeDef?.tilesY ?? 1);
+        for (let dy = 0; dy < sizeY; dy++) {
+            for (let dx = 0; dx < sizeX; dx++) {
+                const tx = anchorX + dx;
+                const ty = anchorY + dy;
+                if (Math.abs(tx - targetX) + Math.abs(ty - targetY) === 1) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private findBestFitAnchorForSelectedTile(entity: WorldEntity, selectedX: number, selectedY: number): { x: number; y: number } | null {
+        const sizeX = Math.max(1, entity.sizeDef?.tilesX ?? 1);
+        const sizeY = Math.max(1, entity.sizeDef?.tilesY ?? 1);
+        const currentX = Math.round(entity.x);
+        const currentY = Math.round(entity.y);
+
+        let best: { x: number; y: number; score: number } | null = null;
+
+        // Try every pivot so the selected tile can map to any slot of the footprint.
+        for (let pivotY = 0; pivotY < sizeY; pivotY++) {
+            for (let pivotX = 0; pivotX < sizeX; pivotX++) {
+                const anchorX = selectedX - pivotX;
+                const anchorY = selectedY - pivotY;
+                if (!this.isFootprintClearAt(anchorX, anchorY, entity.sizeDef, entity.id)) continue;
+
+                // Prefer placements with smaller movement from current position.
+                const moveScore = Math.abs(anchorX - currentX) + Math.abs(anchorY - currentY);
+                // Tie-breaker: keep the clicked tile close to the footprint center.
+                const centerX = anchorX + (sizeX - 1) / 2;
+                const centerY = anchorY + (sizeY - 1) / 2;
+                const centerScore = Math.abs(centerX - selectedX) + Math.abs(centerY - selectedY);
+                const score = moveScore * 100 + centerScore;
+
+                if (!best || score < best.score) {
+                    best = { x: anchorX, y: anchorY, score };
+                }
+            }
+        }
+
+        return best ? { x: best.x, y: best.y } : null;
+    }
+
+    private findBestFitMoveTarget(
+        entity: WorldEntity,
+        selectedX: number,
+        selectedY: number,
+        maxSteps: number,
+    ): { x: number; y: number; path: Array<{ x: number; y: number }> } | null {
+        const sizeX = Math.max(1, entity.sizeDef?.tilesX ?? 1);
+        const sizeY = Math.max(1, entity.sizeDef?.tilesY ?? 1);
+        const currentX = Math.round(entity.x);
+        const currentY = Math.round(entity.y);
+
+        let best: { x: number; y: number; path: Array<{ x: number; y: number }>; score: number } | null = null;
+
+        for (let pivotY = 0; pivotY < sizeY; pivotY++) {
+            for (let pivotX = 0; pivotX < sizeX; pivotX++) {
+                const anchorX = selectedX - pivotX;
+                const anchorY = selectedY - pivotY;
+                if (!this.isFootprintClearAt(anchorX, anchorY, entity.sizeDef, entity.id)) continue;
+
+                const path = this.findOpenPath(currentX, currentY, anchorX, anchorY, maxSteps, entity.sizeDef);
+                if (!path) continue;
+
+                const pivotDistance = Math.abs(pivotX - (sizeX - 1) / 2) + Math.abs(pivotY - (sizeY - 1) / 2);
+                const score = path.length * 100 + pivotDistance;
+
+                if (!best || score < best.score) {
+                    best = { x: anchorX, y: anchorY, path, score };
+                }
+            }
+        }
+
+        return best ? { x: best.x, y: best.y, path: best.path } : null;
+    }
+
     private isEntityOccupied(x: number, y: number, ignoreEntityId?: string): boolean {
         for (const entity of this.entities.values()) {
             if (ignoreEntityId && entity.id === ignoreEntityId) continue;
             if (entity.kind === 'worker' && entity.deployed !== true) continue;
-            if (entity.kind === 'base') {
-                if (Math.abs(entity.x - x) <= 2 && Math.abs(entity.y - y) <= 2) {
-                    return true;
-                }
-                continue;
-            }
-            if (Math.round(entity.x) === x && Math.round(entity.y) === y) {
+
+            const sizeX = entity.sizeDef?.tilesX ?? 1;
+            const sizeY = entity.sizeDef?.tilesY ?? 1;
+            const ex = Math.round(entity.x);
+            const ey = Math.round(entity.y);
+
+            if (x >= ex && x < ex + sizeX && y >= ey && y < ey + sizeY) {
                 return true;
             }
         }
@@ -2818,44 +2970,30 @@ export class WorldModel {
     }
 
     private findMineApproachPath(worker: WorldEntity, targetX: number, targetY: number): { path: Array<{ x: number; y: number }>; approachX: number; approachY: number } | null {
-        const startX = Math.round(worker.x);
-        const startY = Math.round(worker.y);
-        const startTile = this.getTile(startX, startY);
-        if (!startTile || startTile.solid) return null;
+        const sizeX = Math.max(1, worker.sizeDef?.tilesX ?? 1);
+        const sizeY = Math.max(1, worker.sizeDef?.tilesY ?? 1);
+        const currentX = Math.round(worker.x);
+        const currentY = Math.round(worker.y);
+        let best: { path: Array<{ x: number; y: number }>; approachX: number; approachY: number; score: number } | null = null;
 
-        const queue: Array<{ x: number; y: number }> = [{ x: startX, y: startY }];
-        const previous = new Map<string, string | null>();
-        previous.set(`${startX},${startY}`, null);
-
-        while (queue.length > 0) {
-            const current = queue.shift();
-            if (!current) continue;
-
-            for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
-                const neighborX = current.x + ox;
-                const neighborY = current.y + oy;
-                if (neighborX === targetX && neighborY === targetY) {
-                    const path: Array<{ x: number; y: number }> = [];
-                    let key: string | null = `${current.x},${current.y}`;
-                    while (key) {
-                        const [px, py] = key.split(',').map(Number);
-                        path.push({ x: px, y: py });
-                        key = previous.get(key) ?? null;
+        for (let fy = 0; fy < sizeY; fy++) {
+            for (let fx = 0; fx < sizeX; fx++) {
+                for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+                    const approachX = targetX + ox - fx;
+                    const approachY = targetY + oy - fy;
+                    if (!this.isFootprintClearAt(approachX, approachY, worker.sizeDef, worker.id)) continue;
+                    if (!this.footprintTouchesTile(approachX, approachY, worker.sizeDef, targetX, targetY)) continue;
+                    const path = this.findOpenPath(currentX, currentY, approachX, approachY, 25000, worker.sizeDef);
+                    if (!path) continue;
+                    const score = path.length * 100 + Math.abs(approachX - currentX) + Math.abs(approachY - currentY);
+                    if (!best || score < best.score) {
+                        best = { path, approachX, approachY, score };
                     }
-                    path.reverse();
-                    return { path, approachX: current.x, approachY: current.y };
                 }
-
-                const neighborTile = this.getTile(neighborX, neighborY);
-                if (!neighborTile || neighborTile.solid) continue;
-                const key = `${neighborX},${neighborY}`;
-                if (previous.has(key)) continue;
-                previous.set(key, `${current.x},${current.y}`);
-                queue.push({ x: neighborX, y: neighborY });
             }
         }
 
-        return null;
+        return best ? { path: best.path, approachX: best.approachX, approachY: best.approachY } : null;
     }
 
     private findClosestMineTargetPlan(
@@ -2886,7 +3024,7 @@ export class WorldModel {
             },
             canTargetTile: (x, y) => this.canWorkerMineTileForWorker(worker, x, y),
             countSolidNeighbors: (x, y) => this.countSolidNeighbors(x, y),
-            buildPath: (fromX, fromY, toX, toY) => this.findOpenPath(fromX, fromY, toX, toY, 25000),
+            buildPath: (fromX, fromY, toX, toY) => this.findOpenPath(fromX, fromY, toX, toY, 25000, worker.sizeDef),
         });
     }
 
@@ -2941,42 +3079,60 @@ export class WorldModel {
     private tryStartNextEntityCommand(entity: WorldEntity): void {
         if (entity.movement || entity.mining) return;
         if (entity.commandsPaused) return;
+        if ((entity.commandRetryCooldownMs ?? 0) > 0) return;
 
         const commandList = this.getEntityCommandList(entity);
         const state = commandList.snapshot();
         if (state.current) return;
 
-        while (true) {
-            const next = commandList.shiftNext();
-            if (!next) {
-                this.setEntityCommandList(entity, commandList);
-                return;
-            }
-
-            let result: WorkerActionResult;
-            if (next.type === 'move') {
-                if (!Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
-                    result = { ok: false, reason: 'invalid_target' };
-                } else {
-                    result = this.beginMoveWorkerTo(entity, Number(next.payload.x), Number(next.payload.y));
-                }
-            } else if (next.type === 'mine') {
-                if (!Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
-                    result = { ok: false, reason: 'invalid_target' };
-                } else {
-                    result = this.beginWorkerMining(entity, Number(next.payload.x), Number(next.payload.y), next.payload.repeat !== false);
-                }
-            } else {
-                result = this.beginRecallWorker(entity);
-            }
-
-            if (result.ok) {
-                this.setEntityCommandList(entity, commandList);
-                return;
-            }
-
-            commandList.completeCurrent();
+        const next = commandList.shiftNext();
+        if (!next) {
+            this.setEntityCommandList(entity, commandList);
+            return;
         }
+
+        let result: WorkerActionResult;
+        if (next.type === 'move') {
+            if (!Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
+                result = { ok: false, reason: 'invalid_target' };
+            } else {
+                result = this.beginMoveWorkerTo(entity, Number(next.payload.x), Number(next.payload.y));
+            }
+        } else if (next.type === 'mine') {
+            if (!Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
+                result = { ok: false, reason: 'invalid_target' };
+            } else {
+                result = this.beginWorkerMining(entity, Number(next.payload.x), Number(next.payload.y), next.payload.repeat !== false);
+            }
+        } else {
+            result = this.beginRecallWorker(entity);
+        }
+
+        if (result.ok) {
+            entity.commandRetryCooldownMs = 0;
+            this.setEntityCommandList(entity, commandList);
+            return;
+        }
+
+        // Preserve repeat mining loops across transient failures (reservation/path contention),
+        // but do not let retries accumulate in queue.
+        if (next.type === 'mine' && next.payload.repeat !== false && (result.reason === 'path_blocked' || result.reason === 'invalid_target')) {
+            commandList.completeCurrent();
+            if (commandList.snapshot().queue.length === 0) {
+                commandList.enqueue('mine', {
+                    x: next.payload.x,
+                    y: next.payload.y,
+                    repeat: true,
+                }, 'append');
+            }
+            entity.commandRetryCooldownMs = 300;
+            this.setEntityCommandList(entity, commandList);
+            return;
+        }
+
+        commandList.completeCurrent();
+        entity.commandRetryCooldownMs = Math.max(entity.commandRetryCooldownMs ?? 0, 100);
+        this.setEntityCommandList(entity, commandList);
     }
 
     private enqueueEntityCommand(
@@ -3015,6 +3171,7 @@ export class WorldModel {
 
         commandList.enqueue(command.type, { x: command.x, y: command.y, repeat: command.repeat }, 'append');
         this.setEntityCommandList(entity, commandList);
+        entity.commandRetryCooldownMs = 0;
         if (entity.commandsPaused) entity.commandsPaused = false;
         this.tryStartNextEntityCommand(entity);
         this.markChunkDirtyAt(entity.x, entity.y);
@@ -3077,12 +3234,21 @@ export class WorldModel {
         return reason;
     }
 
-    private isInBaseDropoffZone(base: WorldEntity, x: number, y: number): boolean {
+    private isInBaseDropoffZone(base: WorldEntity, x: number, y: number, sizeDef?: EntitySizeDef): boolean {
         if (base.kind !== 'base') return false;
-        return Math.abs(x - base.x) <= 3 && Math.abs(y - base.y) <= 3;
+        const sizeX = Math.max(1, sizeDef?.tilesX ?? 1);
+        const sizeY = Math.max(1, sizeDef?.tilesY ?? 1);
+        for (let dy = 0; dy < sizeY; dy++) {
+            for (let dx = 0; dx < sizeX; dx++) {
+                if (Math.abs(x + dx - base.x) <= 3 && Math.abs(y + dy - base.y) <= 3) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
-    private findNearestDropoffTile(base: WorldEntity, fromX: number, fromY: number): { x: number; y: number } | null {
+    private findNearestDropoffTile(base: WorldEntity, fromX: number, fromY: number, sizeDef?: EntitySizeDef, ignoreEntityId?: string): { x: number; y: number } | null {
         const startX = Math.round(fromX);
         const startY = Math.round(fromY);
         const maxRadius = 4;
@@ -3093,10 +3259,8 @@ export class WorldModel {
                 const tx = base.x + ox;
                 const ty = base.y + oy;
                 if (Math.max(Math.abs(ox), Math.abs(oy)) > maxRadius) continue;
-                if (!this.isInBaseDropoffZone(base, tx, ty)) continue;
-                const tile = this.getTile(tx, ty);
-                if (!tile || tile.solid || tile.visibility === 'Unknown') continue;
-                if (this.isEntityOccupied(tx, ty, base.id)) continue;
+                if (!this.isInBaseDropoffZone(base, tx, ty, sizeDef)) continue;
+                if (!this.isFootprintClearAt(tx, ty, sizeDef, ignoreEntityId)) continue;
                 const score = Math.abs(tx - startX) + Math.abs(ty - startY);
                 if (!best || score < best.score) {
                     best = { x: tx, y: ty, score };
@@ -3104,7 +3268,7 @@ export class WorldModel {
             }
         }
 
-        return best ? { x: best.x, y: best.y } : this.findDeploymentTile(base);
+        return best ? { x: best.x, y: best.y } : this.findDeploymentTile(base, sizeDef, ignoreEntityId);
     }
 
     private rebuildMineReservationsFromEntities(): void {

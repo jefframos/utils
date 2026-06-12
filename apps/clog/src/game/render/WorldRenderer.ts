@@ -1,6 +1,7 @@
 import { Container, Graphics } from 'pixi.js';
 import { LOD_TILE_DETAIL_MIN_ZOOM, TILE_SIZE } from '../config';
 import { BIOME_DEFINITIONS } from '../content/biomes';
+import { getEntityDefinition } from '../content/entityDefinitions';
 import { spaceDustStrength, surfaceNoise } from '../world/noise';
 import { WorldModel } from '../world/WorldModel';
 
@@ -161,22 +162,36 @@ export class WorldRenderer {
         this.entityOverlay.clear();
 
         for (const entity of this.world.getEntities()) {
-            const px = entity.x * TILE_SIZE;
-            const py = entity.y * TILE_SIZE;
             const isSelected = entity.id === this.selectedEntityId;
 
+            // Always read from the entity's stamped definitions (falls back to registry lookup)
+            const def = getEntityDefinition(entity.kind, entity.unitType);
+            const sizeDef = entity.sizeDef ?? def.sizeDef;
+            const viewDef = entity.viewDef ?? def.viewDef;
+
+            const color = parseInt(viewDef.color.replace('#', ''), 16);
+
+            const px = entity.x * TILE_SIZE;
+            const py = entity.y * TILE_SIZE;
+            const w = sizeDef.tilesX * TILE_SIZE;
+            const h = sizeDef.tilesY * TILE_SIZE;
+
             if (entity.kind === 'base') {
-                this.entityOverlay.rect((entity.x - 2) * TILE_SIZE, (entity.y - 2) * TILE_SIZE, TILE_SIZE * 5, TILE_SIZE * 5).fill(0x1d4ed8);
-                this.entityOverlay.rect((entity.x - 1) * TILE_SIZE, (entity.y - 1) * TILE_SIZE, TILE_SIZE * 3, TILE_SIZE * 3).fill(0x93c5fd);
+                // Base uses a fixed decorative two-layer rect; respect its sizeDef for selection ring
+                const bx = (Math.round(entity.x) - 2) * TILE_SIZE;
+                const by = (Math.round(entity.y) - 2) * TILE_SIZE;
+                this.entityOverlay.rect(bx, by, TILE_SIZE * 5, TILE_SIZE * 5).fill(0x1d4ed8);
+                this.entityOverlay.rect(bx + TILE_SIZE, by + TILE_SIZE, TILE_SIZE * 3, TILE_SIZE * 3).fill(0x93c5fd);
                 if (isSelected) {
-                    this.entityOverlay.rect((entity.x - 2) * TILE_SIZE, (entity.y - 2) * TILE_SIZE, TILE_SIZE * 5, TILE_SIZE * 5).stroke({ color: 0xffffff, width: 3, alpha: 0.9 });
+                    this.entityOverlay.rect(bx, by, TILE_SIZE * 5, TILE_SIZE * 5).stroke({ color: 0xffffff, width: 3, alpha: 0.9 });
                 }
                 continue;
             }
 
             if (entity.kind === 'beacon') {
-                this.entityOverlay.rect(px + 4, py + 4, TILE_SIZE - 8, TILE_SIZE - 8).fill(0xf59e0b);
-                this.entityOverlay.rect(px + 6, py + 6, TILE_SIZE - 12, TILE_SIZE - 12).fill(0xfbbf24);
+                const margin = 4;
+                this.entityOverlay.rect(px + margin, py + margin, TILE_SIZE - margin * 2, TILE_SIZE - margin * 2).fill(color);
+                this.entityOverlay.rect(px + margin + 2, py + margin + 2, TILE_SIZE - margin * 2 - 4, TILE_SIZE - margin * 2 - 4).fill(0xfbbf24);
                 if (isSelected) {
                     this.entityOverlay.rect(px + 2, py + 2, TILE_SIZE - 4, TILE_SIZE - 4).stroke({ color: 0xffffff, width: 2, alpha: 0.95 });
                 }
@@ -184,19 +199,25 @@ export class WorldRenderer {
             }
 
             if (entity.kind === 'player') {
-                this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, 6).fill(0x7c3aed);
-                this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, 3).fill(0xf3e8ff);
+                const cx = px + TILE_SIZE * 0.5;
+                const cy = py + TILE_SIZE * 0.5;
+                this.entityOverlay.circle(cx, cy, 6).fill(color);
+                this.entityOverlay.circle(cx, cy, 3).fill(0xf3e8ff);
                 if (isSelected) {
-                    this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, 8).stroke({ color: 0xffffff, width: 2, alpha: 0.95 });
+                    this.entityOverlay.circle(cx, cy, 8).stroke({ color: 0xffffff, width: 2, alpha: 0.95 });
                 }
                 continue;
             }
 
             if (entity.kind === 'worker' && entity.deployed) {
-                this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, 5).fill(0x22c55e);
-                this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, 2).fill(0xdcfce7);
+                const margin = 3;
+                // Filled body sized to footprint
+                this.entityOverlay.rect(px + margin, py + margin, w - margin * 2, h - margin * 2).fill(color);
+                // Inner highlight dot at top-left cell center
+                const dotR = Math.max(2, Math.min(4, (TILE_SIZE - 8) / 2));
+                this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, dotR).fill(0xffffff);
                 if (isSelected) {
-                    this.entityOverlay.circle(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, 7).stroke({ color: 0xffffff, width: 2, alpha: 0.95 });
+                    this.entityOverlay.rect(px + 1, py + 1, w - 2, h - 2).stroke({ color: 0xffffff, width: 2, alpha: 0.95 });
                 }
             }
         }

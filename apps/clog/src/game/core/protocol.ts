@@ -29,9 +29,10 @@ export type RemoveBeaconCommand = {
     entityId: string;
 };
 
-export type SpawnWorkerCommand = {
-    type: 'SpawnWorker';
+export type SpawnUnitCommand = {
+    type: 'SpawnUnit';
     buildingId: string;
+    unitType: import('../content/workers').WorkerUnitType;
 };
 
 export type DeployWorkerCommand = {
@@ -147,7 +148,7 @@ export type GameCommand =
     | LoadWorldSnapshotCommand
     | PlaceBeaconCommand
     | RemoveBeaconCommand
-    | SpawnWorkerCommand
+    | SpawnUnitCommand
     | DeployWorkerCommand
     | RecallWorkerCommand
     | RecallWorkersCommand
@@ -238,7 +239,7 @@ export type WorkerSpawnedEvent = {
     type: 'WorkerSpawned';
     workerId: string;
     buildingId: string;
-    unitType: 'basic-worker';
+    unitType: 'basic-worker' | 'large-worker';
 };
 
 export type WorkerDeployedEvent = {

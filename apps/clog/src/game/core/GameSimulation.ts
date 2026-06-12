@@ -199,8 +199,8 @@ export class GameSimulation {
             ];
         }
 
-        if (command.type === 'SpawnWorker') {
-            const spawned = this.world.spawnWorkerAtBuilding(command.buildingId);
+        if (command.type === 'SpawnUnit') {
+            const spawned = this.world.spawnUnitAtBuilding(command.buildingId, command.unitType);
             if (!spawned.ok) {
                 return [{ type: 'WorkerActionFailed', action: 'spawn', id: command.buildingId, reason: spawned.reason }];
             }
@@ -301,12 +301,9 @@ export class GameSimulation {
         }
 
         if (command.type === 'MoveEntity') {
-            console.log(`[sim:MoveEntity] entityId=${command.entityId} target=(${command.x},${command.y})`);
             const entity = this.world.getEntityById(command.entityId);
-            if (!entity) { console.warn(`[sim:MoveEntity] entity not found: ${command.entityId}`); return []; }
-            console.log(`[sim:MoveEntity] kind=${entity.kind} pos=(${entity.x.toFixed(1)},${entity.y.toFixed(1)}) paused=${entity.commandsPaused} movement=${!!entity.movement} mining=${!!entity.mining}`);
+            if (!entity) { return []; }
             const moved = this.world.moveEntityTo(command.entityId, command.x, command.y);
-            console.log(`[sim:MoveEntity] result ok=${moved.ok}${'reason' in moved ? ` reason=${moved.reason}` : ''}`);
             if (!moved.ok) {
                 if (entity.kind === 'worker') {
                     return [{ type: 'WorkerActionFailed', action: 'move', id: command.entityId, reason: normalizeWorkerReason(moved.reason) }];
@@ -332,12 +329,9 @@ export class GameSimulation {
         }
 
         if (command.type === 'MineEntity') {
-            console.log(`[sim:MineEntity] entityId=${command.entityId} target=(${command.x},${command.y}) repeat=${command.repeat ?? true}`);
             const entity = this.world.getEntityById(command.entityId);
-            if (!entity) { console.warn(`[sim:MineEntity] entity not found: ${command.entityId}`); return []; }
-            console.log(`[sim:MineEntity] kind=${entity.kind} pos=(${entity.x.toFixed(1)},${entity.y.toFixed(1)}) paused=${entity.commandsPaused} miningDef=${!!entity.miningDef} movement=${!!entity.movement} mining=${!!entity.mining}`);
+            if (!entity) { return []; }
             const started = this.world.startEntityMining(command.entityId, command.x, command.y, command.repeat ?? true);
-            console.log(`[sim:MineEntity] result ok=${started.ok}${'reason' in started ? ` reason=${started.reason}` : ''}`);
             if (!started.ok) {
                 if (entity.kind === 'worker') {
                     return [{ type: 'WorkerActionFailed', action: 'mine', id: command.entityId, reason: normalizeWorkerReason(started.reason) }];

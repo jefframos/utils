@@ -39,6 +39,7 @@ import { getBiomeGenerationNodeGraphMermaid } from './world/noise';
 import type { EntityInventoryAdapter } from './ui/EntityDetailsWindow';
 import type { WorldEntity } from './world/WorldModel';
 import { BIOME_DEFINITIONS } from './content/biomes';
+import { getEntityLabel } from './content/entityDefinitions';
 
 export async function bootstrapGame(): Promise<void> {
     const app = new Application();
@@ -99,6 +100,9 @@ export async function bootstrapGame(): Promise<void> {
     const inventoryChangeListeners = new Set<() => void>();
 
     const notifyInventoryChanged = () => {
+        // Suppress during entity sync to prevent EntityDetailsWindow re-entrancy
+        // (replaceState → notifyStateChange → notifyInventoryChanged → renderEntityInventory again).
+        if (isApplyingEntityInventorySync) return;
         for (const listener of inventoryChangeListeners) {
             listener();
         }
@@ -281,32 +285,39 @@ export async function bootstrapGame(): Promise<void> {
         inventoryId: string,
         quantity: number,
     ): boolean => {
-        const itemId = `${inventoryId}:ore`;
-        const existing = state.items.find((item) => item.id === itemId);
-        if (quantity <= 0) {
-            if (!existing) return false;
-            state.items = state.items.filter((item) => item.id !== itemId);
-            return true;
-        }
+        // Remove all existing ore items for this inventory container.
+        const prevCount = state.items.length;
+        state.items = state.items.filter(
+            (item) => !(
+                (item.location.inventoryId ?? 'player') === inventoryId &&
+                item.definitionId === 'debug-asteroid-ore'
+            ),
+        );
+        const removed = prevCount !== state.items.length;
 
-        if (existing) {
-            if (existing.quantity === quantity) return false;
-            existing.quantity = quantity;
-            return true;
-        }
+        if (quantity <= 0) return removed;
 
-        state.items.push({
-            id: itemId,
-            definitionId: 'debug-asteroid-ore',
-            quantity,
-            durability: 1,
-            location: {
-                inventoryId,
-                section: 'storage',
-                x: 0,
-                y: 0,
-            },
-        });
+        const container = state.containers[inventoryId];
+        const columns = container?.sections.storage.columns ?? ENTITY_INVENTORY_COLUMNS;
+        const maxSlots = container?.maxSlots ?? 1;
+        const stackCap = container?.maxStackSize ?? 99;
+
+        let remaining = Math.max(0, Math.floor(quantity));
+        let slotIndex = 0;
+        while (remaining > 0 && slotIndex < maxSlots) {
+            const slotQty = Math.min(remaining, stackCap);
+            const x = slotIndex % columns;
+            const y = Math.floor(slotIndex / columns);
+            state.items.push({
+                id: `${inventoryId}:ore-${slotIndex}`,
+                definitionId: 'debug-asteroid-ore',
+                quantity: slotQty,
+                durability: 1,
+                location: { inventoryId, section: 'storage', x: Math.floor(x), y: Math.floor(y) },
+            });
+            remaining -= slotQty;
+            slotIndex++;
+        }
         return true;
     };
 
@@ -334,16 +345,18 @@ export async function bootstrapGame(): Promise<void> {
             };
         },
         onStateChange: (state) => {
+            // This callback is only triggered by entity-inventory sync (mirroring worker carried ore
+            // into the UI container). It must NOT call notifyInventoryChanged, because that would
+            // fire the EntityDetailsWindow listener → syncEntityInventory → onStateChange again,
+            // causing an infinite loop. Real inventory mutations (delivery, player collect) go
+            // through their own paths that call notifyInventoryChanged directly.
             if (isApplyingEntityInventorySync) return;
-            sanitizeInventoryItemLocations(state);
+            isApplyingEntityInventorySync = true;
             if (inventoryPanel) {
-                isApplyingEntityInventorySync = true;
                 inventoryPanel.replaceState(state);
-                isApplyingEntityInventorySync = false;
             }
-            saveInventoryState(state);
-            resourcesPanel?.update();
-            notifyInventoryChanged();
+            isApplyingEntityInventorySync = false;
+            // Entity sync writes only display data — no need to persist or notify global listeners.
         },
         onInspectItem: (selection) => {
             inventoryItemDetails?.setSelection(selection);
@@ -956,7 +969,8 @@ export async function bootstrapGame(): Promise<void> {
         }
 
         if (event.type === 'WorkerSpawned') {
-            panel.setStatus(`Worker created at station (${event.buildingId}).`);
+            const unitLabel = getEntityLabel('worker', event.unitType);
+            panel.setStatus(`${unitLabel} created at station (${event.buildingId}).`);
             worldAutosave.schedule();
         }
 

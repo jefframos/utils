@@ -356,8 +356,8 @@ function buildOccupancyMap(state: InventoryState, inventoryId: string, section: 
         const last = sortedCells[sortedCells.length - 1] ?? first;
 
         for (const rel of definition.shape.cells) {
-            const x = item.location.x + rel.x;
-            const y = item.location.y + rel.y;
+            const x = Math.floor(item.location.x) + rel.x;
+            const y = Math.floor(item.location.y) + rel.y;
             const key = `${x}:${y}`;
             map.set(key, {
                 item,
