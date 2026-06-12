@@ -3,7 +3,7 @@ import type { ResourceType } from '../inventory/InventoryModel';
 import { getInventoryItemDefinition } from '../inventory/InventoryModel';
 
 type ResourcesPanelOptions = {
-    inventoryState: InventoryState;
+    getInventoryState: () => InventoryState;
     getInventoryBucket?: (inventoryId: string) => 'storage' | 'held' | 'ignore';
 };
 
@@ -22,24 +22,9 @@ const RESOURCE_DISPLAY_INFO: Record<ResourceType, { label: string; color: string
 export function createResourcesPanel(options: ResourcesPanelOptions): ResourcesPanel {
     const root = document.createElement('div');
     root.className = 'resources-panel';
-    root.style.cssText = `
-        position: fixed;
-        top: 50px;
-        left: 12px;
-        background: rgba(15, 23, 42, 0.85);
-        border: 2px solid rgba(100, 116, 139, 0.5);
-        border-radius: 6px;
-        padding: 8px 12px;
-        font-family: monospace;
-        font-size: 12px;
-        line-height: 1.5;
-        color: #e2e8f0;
-        z-index: 100;
-        pointer-events: none;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-    `;
 
     const update = () => {
+        const inventoryState = options.getInventoryState();
         root.innerHTML = '';
         const resources: Record<ResourceType, { storage: number; held: number }> = {
             'debug-asteroid-ore': { storage: 0, held: 0 },
@@ -48,7 +33,7 @@ export function createResourcesPanel(options: ResourcesPanelOptions): ResourcesP
             'debug-battery': { storage: 0, held: 0 },
         };
 
-        for (const item of options.inventoryState.items) {
+        for (const item of inventoryState.items) {
             const definition = getInventoryItemDefinition(item.definitionId);
             if (!definition || definition.itemType !== 'resource') continue;
             if (!(item.definitionId in resources)) continue;
@@ -66,41 +51,39 @@ export function createResourcesPanel(options: ResourcesPanelOptions): ResourcesP
         }
 
         const title = document.createElement('div');
-        title.style.cssText = `
-            font-weight: bold;
-            margin-bottom: 4px;
-            color: #cbd5e1;
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        `;
+        title.className = 'resources-panel-title';
         title.textContent = 'Resources';
         root.appendChild(title);
 
+        let hasResourceRows = false;
         for (const [resourceId, counts] of Object.entries(resources) as Array<[ResourceType, { storage: number; held: number }]>) {
             if (counts.storage === 0 && counts.held === 0) continue;
+            hasResourceRows = true;
 
             const info = RESOURCE_DISPLAY_INFO[resourceId];
             const row = document.createElement('div');
-            row.style.cssText = `
-                display: flex;
-                justify-content: space-between;
-                gap: 12px;
-                padding: 2px 0;
-            `;
+            row.className = 'resources-panel-row';
 
             const label = document.createElement('span');
+            label.className = 'resources-panel-label';
             label.textContent = info.label;
             label.style.color = info.color;
 
             const value = document.createElement('span');
+            value.className = 'resources-panel-value';
             value.textContent = `${counts.storage} (${counts.held})`;
-            value.style.fontWeight = 'bold';
             value.style.color = info.color;
 
             row.appendChild(label);
             row.appendChild(value);
             root.appendChild(row);
+        }
+
+        if (!hasResourceRows) {
+            const empty = document.createElement('div');
+            empty.className = 'resources-panel-empty';
+            empty.textContent = 'No resources tracked yet';
+            root.appendChild(empty);
         }
     };
 

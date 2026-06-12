@@ -14,7 +14,7 @@ import { createToolInspectorPanel } from './ui/ToolInspectorPanel';
 import { createWindowControlRail } from './ui/WindowControlRail';
 import { createDebugGraphWindow } from './ui/DebugGraphWindow';
 import { ViewportSpace } from './core/ViewportSpace';
-import { createDebugInventoryState, getInventoryItemDefinition, getTotalResourceCount, type InventoryState } from './inventory/InventoryModel';
+import { addInventoryItem, createDebugInventoryState, getInventoryItemDefinition, getMaxStackForInventory, getTotalResourceCount, type InventoryState } from './inventory/InventoryModel';
 import {
     createWorldAutosave,
     loadInventoryState,
@@ -38,6 +38,7 @@ import { createMinimapUiModule } from './modules/builtin/MinimapUiModule';
 import { getBiomeGenerationNodeGraphMermaid } from './world/noise';
 import type { EntityInventoryAdapter } from './ui/EntityDetailsWindow';
 import type { WorldEntity } from './world/WorldModel';
+import { BIOME_DEFINITIONS } from './content/biomes';
 
 export async function bootstrapGame(): Promise<void> {
     const app = new Application();
@@ -50,6 +51,7 @@ export async function bootstrapGame(): Promise<void> {
     });
 
     document.body.appendChild(app.canvas);
+    document.body.classList.add('theme-terminal80s');
 
     const engine = createGameEngine({ useWorker: true });
 
@@ -63,7 +65,6 @@ export async function bootstrapGame(): Promise<void> {
     }
 
     let mainActionToolId = simulation.tools.getActiveTool().id;
-    let pendingWorkerOreDelivered = 0;
 
     const persistedMeta = loadMetaFromCookie();
     const initialMinimap = normalizeMinimapMeta(persistedMeta?.windows?.minimap ?? {});
@@ -103,8 +104,86 @@ export async function bootstrapGame(): Promise<void> {
         }
     };
 
+    const getStackCapForEntity = (entity: WorldEntity): number => {
+        return entity.mobility === 'static' ? 999 : 99;
+    };
+
+    const getStackCapForInventory = (inventoryId: string): number => {
+        if (inventoryId === 'player') return 99;
+        if (!inventoryId.startsWith('entity:')) return 99;
+
+        const entityId = inventoryId.slice('entity:'.length);
+        const entity = simulation.world.getEntityById(entityId);
+        if (!entity) return 99;
+        return getStackCapForEntity(entity);
+    };
+
+    const getMaxSlotsForInventory = (inventoryId: string): number | undefined => {
+        if (inventoryId === 'player') {
+            const player = simulation.world.getEntityById(simulation.world.getMainPlayerEntityId());
+            if (player?.inventoryDef?.capacity != null) {
+                return Math.max(1, Math.floor(player.inventoryDef.capacity));
+            }
+            return 12;
+        }
+
+        if (!inventoryId.startsWith('entity:')) return undefined;
+        const entityId = inventoryId.slice('entity:'.length);
+        const entity = simulation.world.getEntityById(entityId);
+        if (!entity) return undefined;
+
+        if (entity.inventoryDef?.capacity != null) {
+            return Math.max(1, Math.floor(entity.inventoryDef.capacity));
+        }
+
+        if (entity.kind === 'worker') return 1;
+        if (entity.kind === 'player') return 12;
+        if (entity.kind === 'base') return 48;
+        return undefined;
+    };
+
     const sanitizeInventoryItemLocations = (state: InventoryState): boolean => {
         let changed = false;
+
+        const stackOverflows: Array<{ definitionId: string; inventoryId: string; quantity: number }> = [];
+        for (const [inventoryId, container] of Object.entries(state.containers)) {
+            const expectedCap = getStackCapForInventory(inventoryId);
+            if (container.maxStackSize !== expectedCap) {
+                container.maxStackSize = expectedCap;
+                changed = true;
+            }
+
+            const expectedSlots = getMaxSlotsForInventory(inventoryId);
+            if (container.maxSlots !== expectedSlots) {
+                container.maxSlots = expectedSlots;
+                changed = true;
+            }
+        }
+
+        for (const item of state.items) {
+            const definition = getInventoryItemDefinition(item.definitionId);
+            if (!definition) continue;
+
+            const maxStack = getMaxStackForInventory(state, definition, item.location.inventoryId);
+            if (item.quantity > maxStack) {
+                const overflow = item.quantity - maxStack;
+                item.quantity = maxStack;
+                stackOverflows.push({
+                    definitionId: item.definitionId,
+                    inventoryId: item.location.inventoryId ?? 'player',
+                    quantity: overflow,
+                });
+                changed = true;
+            }
+        }
+
+        for (const overflow of stackOverflows) {
+            const added = addInventoryItem(state, overflow.definitionId, overflow.quantity, overflow.inventoryId);
+            if (added !== overflow.quantity) {
+                // If container is full, drop the remainder rather than keeping invalid oversized stacks.
+                changed = true;
+            }
+        }
 
         for (const item of state.items) {
             const definition = getInventoryItemDefinition(item.definitionId);
@@ -130,26 +209,54 @@ export async function bootstrapGame(): Promise<void> {
         return changed;
     };
 
-    const getEntityInventoryCapacity = (entity: WorldEntity): number => {
-        if (entity.kind === 'worker') return 1;
-        if (entity.kind === 'player') return 24;
-        if (entity.kind === 'base') return 48;
-        return 0;
+    const getEntityInventoryBinding = (entity: WorldEntity): { inventoryId: string; maxSlots: number } | null => {
+        const capacity = entity.kind === 'player'
+            ? 12
+            : entity.inventoryDef?.capacity != null
+                ? Math.max(0, Math.floor(entity.inventoryDef.capacity))
+                : entity.kind === 'worker'
+                    ? 1
+                    : entity.kind === 'base'
+                        ? 48
+                        : 0;
+        const maxSlots = Math.max(0, Math.floor(capacity));
+        if (maxSlots <= 0) return null;
+
+        const sharedId = entity.inventoryDef?.sharedId?.trim();
+        if (sharedId && sharedId.length > 0) {
+            // Keep backward compatibility with persisted inventory state using the legacy player container id.
+            if (sharedId === 'main-player') {
+                return {
+                    inventoryId: 'player',
+                    maxSlots,
+                };
+            }
+            return {
+                inventoryId: `shared:${sharedId}`,
+                maxSlots,
+            };
+        }
+
+        return {
+            inventoryId: `entity:${entity.id}`,
+            maxSlots,
+        };
     };
 
     const ensureEntityInventoryContainer = (
         entity: WorldEntity,
         state: InventoryState,
     ): { inventoryId: string; maxSlots: number } | null => {
-        const maxSlots = getEntityInventoryCapacity(entity);
-        if (maxSlots <= 0) return null;
+        const binding = getEntityInventoryBinding(entity);
+        if (!binding) return null;
 
-        const inventoryId = `entity:${entity.id}`;
+        const { inventoryId, maxSlots } = binding;
         const visibleSlots = Math.max(ENTITY_INVENTORY_DEFAULT_VISIBLE, maxSlots);
         const rows = Math.max(1, Math.ceil(visibleSlots / ENTITY_INVENTORY_COLUMNS));
         const existing = state.containers[inventoryId];
         if (
             !existing
+            || existing.maxStackSize !== getStackCapForInventory(inventoryId)
             || existing.sections.storage.columns !== ENTITY_INVENTORY_COLUMNS
             || existing.sections.storage.rows !== rows
             || existing.sections.hotbar.columns !== ENTITY_INVENTORY_COLUMNS
@@ -157,6 +264,8 @@ export async function bootstrapGame(): Promise<void> {
         ) {
             state.containers[inventoryId] = {
                 id: inventoryId,
+                maxStackSize: getStackCapForInventory(inventoryId),
+                maxSlots,
                 sections: {
                     storage: { columns: ENTITY_INVENTORY_COLUMNS, rows },
                     hotbar: { columns: ENTITY_INVENTORY_COLUMNS, rows: 0 },
@@ -203,15 +312,20 @@ export async function bootstrapGame(): Promise<void> {
 
     let toolInspector: ReturnType<typeof createToolInspectorPanel> | null = null;
     let onToolEquippedExternally: (toolId: string) => void = () => { };
+    let isApplyingEntityInventorySync = false;
     const entityInventoryAdapter: EntityInventoryAdapter = {
         getState: () => inventoryPanel?.getState() ?? null,
         ensureEntityInventory: (entity, state) => ensureEntityInventoryContainer(entity, state),
         syncEntityInventory: (entity, state, binding) => {
-            if (entity.kind !== 'worker') return false;
+            // Only worker carried ore is mirrored into entity inventory UI.
+            // Player/resource ownership is handled via world events and main inventory flow.
+            if (entity.kind !== 'worker' || !entity.miningDef) return false;
             const carriedOre = Math.max(0, Math.floor(entity.mining?.carriedOre ?? 0));
-            const oreChanged = upsertOreItem(state, binding.inventoryId, carriedOre);
-            const posChanged = sanitizeInventoryItemLocations(state);
-            return oreChanged || posChanged;
+            const stackCap = Math.max(1, Math.floor(state.containers[binding.inventoryId]?.maxStackSize ?? 99));
+            const slotCap = Math.max(1, Math.floor(state.containers[binding.inventoryId]?.maxSlots ?? binding.maxSlots));
+            const representableCap = stackCap * slotCap;
+            const clampedCarried = Math.min(carriedOre, representableCap);
+            return upsertOreItem(state, binding.inventoryId, clampedCarried);
         },
         onDidChange: (listener) => {
             inventoryChangeListeners.add(listener);
@@ -220,9 +334,12 @@ export async function bootstrapGame(): Promise<void> {
             };
         },
         onStateChange: (state) => {
+            if (isApplyingEntityInventorySync) return;
             sanitizeInventoryItemLocations(state);
             if (inventoryPanel) {
+                isApplyingEntityInventorySync = true;
                 inventoryPanel.replaceState(state);
+                isApplyingEntityInventorySync = false;
             }
             saveInventoryState(state);
             resourcesPanel?.update();
@@ -260,21 +377,17 @@ export async function bootstrapGame(): Promise<void> {
             return getTotalResourceCount(inventoryPanel.getState(), 'debug-asteroid-ore') ?? 0;
         },
         (amount) => {
-            pendingWorkerOreDelivered += amount;
             // Worker deliveries only happen when a mining tile was opened.
             // Flush immediately so opened tiles do not reappear after refresh.
             worldAutosave.flush();
             if (!inventoryPanel) return;
-            const added = inventoryPanel.addItem('debug-asteroid-ore', pendingWorkerOreDelivered);
-            pendingWorkerOreDelivered -= added;
 
             const state = inventoryPanel.getState();
             const base = simulation.world.getEntities().find((entry) => entry.kind === 'base');
             if (base) {
                 const binding = ensureEntityInventoryContainer(base, state);
                 if (binding) {
-                    const existingOre = state.items.find((item) => item.id === `${binding.inventoryId}:ore`)?.quantity ?? 0;
-                    upsertOreItem(state, binding.inventoryId, existingOre + added);
+                    addInventoryItem(state, 'debug-asteroid-ore', Math.max(0, Math.floor(amount)), binding.inventoryId);
                     sanitizeInventoryItemLocations(state);
                     inventoryPanel.replaceState(state);
                     saveInventoryState(state);
@@ -283,7 +396,7 @@ export async function bootstrapGame(): Promise<void> {
             }
 
             resourcesPanel?.update();
-            panel.setStatus(`Collected ${added} ore from worker delivery.`);
+            panel.setStatus(`Collected ${Math.max(0, Math.floor(amount))} ore from worker delivery.`);
         },
         // Player mines directly into their own inventory — no carry/return cycle.
         (oreDefinitionId, amount) => {
@@ -294,9 +407,49 @@ export async function bootstrapGame(): Promise<void> {
                 added = inventoryPanel.addItem('debug-asteroid-ore', amount);
             }
             if (added > 0) {
+                sanitizeInventoryItemLocations(inventoryPanel.getState());
                 worldAutosave.flush();
                 resourcesPanel?.update();
                 panel.setStatus(`Collected ${added} ore.`);
+            }
+
+            if (added < amount) {
+                panel.setStatus('Hero inventory full. Waiting for auto-return to nearest dropoff.');
+            }
+        },
+        (homeId) => {
+            if (!inventoryPanel) return;
+
+            const state = inventoryPanel.getState();
+            const dropoffEntity = homeId
+                ? simulation.world.getEntityById(homeId)
+                : simulation.world.getEntities().find((entry) => entry.kind === 'base') ?? null;
+            if (!dropoffEntity) return;
+
+            const binding = ensureEntityInventoryContainer(dropoffEntity, state);
+            if (!binding) return;
+
+            let unloadedTotal = 0;
+            for (const item of state.items) {
+                if ((item.location.inventoryId ?? 'player') !== 'player') continue;
+                if (item.quantity <= 0) continue;
+                const definition = getInventoryItemDefinition(item.definitionId);
+                if (!definition || definition.itemType !== 'resource') continue;
+
+                const moved = addInventoryItem(state, item.definitionId, item.quantity, binding.inventoryId);
+                if (moved <= 0) continue;
+                item.quantity -= moved;
+                unloadedTotal += moved;
+            }
+
+            if (unloadedTotal > 0) {
+                state.items = state.items.filter((item) => item.quantity > 0);
+                sanitizeInventoryItemLocations(state);
+                inventoryPanel.replaceState(state);
+                saveInventoryState(state);
+                resourcesPanel?.update();
+                notifyInventoryChanged();
+                panel.setStatus(`Hero unloaded ${unloadedTotal} resources at dropoff.`);
             }
         },
         entityInventoryAdapter,
@@ -308,7 +461,38 @@ export async function bootstrapGame(): Promise<void> {
         (state) => {
             metaStore.updateBuildPanel(state);
         },
+        (tileX: number, tileY: number) => {
+            // Display tile information on click
+            const tile = simulation.world.getTile(tileX, tileY);
+            if (!tile) {
+                panel.setStatus(`Clicked outside world bounds (${tileX}, ${tileY}).`);
+                return;
+            }
+
+            const biomeDef = BIOME_DEFINITIONS[tile.biome];
+            if (tile.solid) {
+                panel.setStatus(`${biomeDef.name} ore - HP: ${tile.hp}/${biomeDef.defaultHp}. (Order workers to destroy)`);
+            } else {
+                panel.setStatus(`Open space (${biomeDef.name} biome)`);
+            }
+        },
     );
+
+    // Set up the tooltip display function
+    scene.setTileInfoDisplayFn((tileX: number, tileY: number) => {
+        const tile = simulation.world.getTile(tileX, tileY);
+        if (!tile) {
+            return null;
+        }
+
+        const biomeDef = BIOME_DEFINITIONS[tile.biome];
+        if (tile.solid) {
+            return `${biomeDef.name} ore [${tile.hp}/${biomeDef.defaultHp} HP]`;
+        } else {
+            return `Open space (${biomeDef.name})`;
+        }
+    });
+
     scene.initialize();
     const viewportSpace = ViewportSpace.get();
 
@@ -588,7 +772,6 @@ export async function bootstrapGame(): Promise<void> {
         },
         onGenerate: (seed) => {
             transport.send({ type: 'GenerateWorld', seed });
-            pendingWorkerOreDelivered = 0;
             if (inventoryPanel) {
                 const freshInventory = createDebugInventoryState();
                 freshInventory.equippedToolId = simulation.tools.getActiveTool().id;
@@ -642,6 +825,7 @@ export async function bootstrapGame(): Promise<void> {
         onStateChange: (state) => {
             sanitizeInventoryItemLocations(state);
             saveInventoryState(state);
+            resourcesPanel?.update();
             notifyInventoryChanged();
         },
         onEquipTool: (toolId) => {
@@ -668,7 +852,7 @@ export async function bootstrapGame(): Promise<void> {
 
     // Create resources panel in top-left corner
     resourcesPanel = createResourcesPanel({
-        inventoryState: inventoryPanel.getState(),
+        getInventoryState: () => inventoryPanel!.getState(),
         getInventoryBucket: (inventoryId) => {
             if (inventoryId === 'player') return 'held';
             if (!inventoryId.startsWith('entity:')) return 'ignore';
@@ -680,13 +864,6 @@ export async function bootstrapGame(): Promise<void> {
             return 'held';
         },
     });
-
-    if (pendingWorkerOreDelivered > 0) {
-        const added = inventoryPanel.addItem('debug-asteroid-ore', pendingWorkerOreDelivered);
-        pendingWorkerOreDelivered -= added;
-        resourcesPanel?.update();
-        panel.setStatus(`Collected ${added} ore from worker delivery.`);
-    }
 
     // Refresh resources panel when inventory changes
     const inventoryAddItem = inventoryPanel.addItem.bind(inventoryPanel);
@@ -809,6 +986,11 @@ export async function bootstrapGame(): Promise<void> {
 
         if (event.type === 'WorkerMoved') {
             panel.setStatus(`Worker is moving to (${event.x}, ${event.y}).`);
+            minimap.refresh();
+            worldAutosave.schedule();
+        }
+
+        if (event.type === 'PlayerMoved') {
             minimap.refresh();
             worldAutosave.schedule();
         }

@@ -4,6 +4,7 @@ export {
     canPlaceAtWithIgnoreSet,
     createDebugInventoryState,
     getInventoryItemDefinition,
+    getMaxStackForInventory,
     getItemAtCell,
     getSectionSize,
     moveInventoryItem,

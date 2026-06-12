@@ -122,7 +122,7 @@ export function createPlayerEntity(id: string, x: number, y: number, defaults: E
             buildables: ['beacon'],
         },
         inventoryDef: {
-            capacity: 999,
+            capacity: 12,
             sharedId: 'main-player',
         },
         miningDef: {
@@ -197,7 +197,7 @@ export function normalizeEntityByKind(entity: WorldEntity, defaults: EntityDefau
                 buildables: ['beacon'],
             },
             inventoryDef: entity.inventoryDef ?? {
-                capacity: 999,
+                capacity: 12,
                 sharedId: 'main-player',
             },
             miningDef: entity.miningDef ?? {

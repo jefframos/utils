@@ -2,6 +2,10 @@ import { INVENTORY_ITEM_DEFINITIONS, INVENTORY_LAYOUT, type InventoryItemDefinit
 
 export type InventoryContainer = {
     id: string;
+    /** Optional per-container max stack cap (applies on top of item definition stackSize). */
+    maxStackSize?: number;
+    /** Optional per-container max enabled storage slots. */
+    maxSlots?: number;
     sections: Record<InventorySection, { columns: number; rows: number }>;
 };
 
@@ -18,6 +22,8 @@ export function createDebugInventoryState(): InventoryState {
         containers: {
             [PLAYER_INVENTORY_ID]: {
                 id: PLAYER_INVENTORY_ID,
+                maxStackSize: 99,
+                maxSlots: 12,
                 sections: {
                     storage: { columns: INVENTORY_LAYOUT.storageColumns, rows: INVENTORY_LAYOUT.storageRows },
                     hotbar: { columns: INVENTORY_LAYOUT.hotbarColumns, rows: INVENTORY_LAYOUT.hotbarRows },
@@ -92,6 +98,8 @@ export function canPlaceAtWithIgnoreSet(
     if (location.x + definition.shape.width > size.columns) return false;
     if (location.y + definition.shape.height > size.rows) return false;
 
+    if (!isWithinContainerSlotCapacity(state, definition, location)) return false;
+
     for (const cell of definition.shape.cells) {
         const targetX = location.x + cell.x;
         const targetY = location.y + cell.y;
@@ -128,7 +136,7 @@ export function addInventoryItem(
 
     const invId = normalizeInventoryId(inventoryId);
     let remaining = Math.floor(quantity);
-    const maxStack = getMaxStack(definition);
+    const maxStack = getMaxStackForInventory(state, definition, invId);
 
     if (maxStack > 1) {
         const existingStacks = state.items.filter((item) => {
@@ -184,12 +192,52 @@ function findFirstPlacement(
     return null;
 }
 
-function getMaxStack(definition: InventoryItemDefinition): number {
+function getDefinitionMaxStack(definition: InventoryItemDefinition): number {
     const candidate = definition.attributes.stackSize;
     if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 1) {
         return Math.floor(candidate);
     }
     return 1;
+}
+
+export function getMaxStackForInventory(
+    state: InventoryState,
+    definition: InventoryItemDefinition,
+    inventoryId?: string,
+): number {
+    const definitionMax = getDefinitionMaxStack(definition);
+    const invId = normalizeInventoryId(inventoryId);
+    const containerCap = state.containers[invId]?.maxStackSize;
+    if (typeof containerCap === 'number' && Number.isFinite(containerCap) && containerCap >= 1) {
+        return Math.max(1, Math.min(definitionMax, Math.floor(containerCap)));
+    }
+    return definitionMax;
+}
+
+function isWithinContainerSlotCapacity(
+    state: InventoryState,
+    definition: InventoryItemDefinition,
+    location: InventoryLocation,
+): boolean {
+    const invId = normalizeInventoryId(location.inventoryId);
+    const container = state.containers[invId];
+    if (!container) return true;
+    if (location.section !== 'storage') return true;
+
+    const maxSlots = container.maxSlots;
+    if (typeof maxSlots !== 'number' || !Number.isFinite(maxSlots) || maxSlots < 1) {
+        return true;
+    }
+
+    const columns = container.sections.storage.columns;
+    for (const cell of definition.shape.cells) {
+        const targetX = location.x + cell.x;
+        const targetY = location.y + cell.y;
+        const slotIndex = targetY * columns + targetX;
+        if (slotIndex < 0 || slotIndex >= Math.floor(maxSlots)) return false;
+    }
+
+    return true;
 }
 
 function getDefaultDurability(definition: InventoryItemDefinition): number {

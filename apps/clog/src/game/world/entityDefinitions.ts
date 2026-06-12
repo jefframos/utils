@@ -63,7 +63,7 @@ export const ENTITY_DEFINITIONS: Record<EntityDefinitionId, EntityDefinition> = 
         components: {
             movement: { baseSpeedTilesPerSecond: 2.5 },
             mining: { minePower: 1, mineCooldownMs: 160, carryCapacity: 999 },
-            inventory: { capacity: 999 },
+            inventory: { capacity: 12 },
             life: { maxHp: 100 },
             builder: {
                 buildable: ['beacon'],

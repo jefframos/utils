@@ -128,6 +128,8 @@ export function createInventoryPanel(options: InventoryPanelOptions): InventoryP
                     id,
                     {
                         id: container.id,
+                        maxStackSize: container.maxStackSize,
+                        maxSlots: container.maxSlots,
                         sections: {
                             storage: { ...container.sections.storage },
                             hotbar: { ...container.sections.hotbar },

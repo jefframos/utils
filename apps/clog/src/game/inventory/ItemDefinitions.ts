@@ -159,7 +159,7 @@ export const INVENTORY_ITEM_DEFINITIONS: InventoryItemDefinition[] = [
             backdrop: '#4c4a56',
         },
         attributes: {
-            stackSize: 99,
+            stackSize: 999,
             material: 'asteroid',
             debugOnly: true,
         },
@@ -175,7 +175,7 @@ export const INVENTORY_ITEM_DEFINITIONS: InventoryItemDefinition[] = [
             backdrop: '#204d63',
         },
         attributes: {
-            stackSize: 99,
+            stackSize: 999,
             material: 'ice',
             debugOnly: true,
         },
@@ -191,7 +191,7 @@ export const INVENTORY_ITEM_DEFINITIONS: InventoryItemDefinition[] = [
             backdrop: '#60543b',
         },
         attributes: {
-            stackSize: 99,
+            stackSize: 999,
             material: 'scrap',
             debugOnly: true,
         },
@@ -207,7 +207,7 @@ export const INVENTORY_ITEM_DEFINITIONS: InventoryItemDefinition[] = [
             backdrop: '#4a6e2d',
         },
         attributes: {
-            stackSize: 99,
+            stackSize: 999,
             material: 'power',
             debugOnly: true,
         },

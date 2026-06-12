@@ -2,6 +2,7 @@ import type { InventoryItemDefinition, InventoryItemInstance, InventoryLocation 
 import {
     canPlaceAt,
     canPlaceAtWithIgnoreSet,
+    getMaxStackForInventory,
     getInventoryItemDefinition,
     normalizeInventoryId,
     type InventoryState,
@@ -57,7 +58,7 @@ export function moveItemWithRules(state: InventoryState, itemId: string, target:
     if (!targetDef) return { ok: false, reason: 'definition-not-found' };
 
     if (targetItem.definitionId === movingItem.definitionId) {
-        const maxStack = getMaxStack(movingDef);
+        const maxStack = getMaxStackForInventory(state, movingDef, targetItem.location.inventoryId);
         if (maxStack > 1) {
             const capacity = Math.max(0, maxStack - targetItem.quantity);
             if (capacity <= 0) return { ok: false, reason: 'blocked' };
@@ -118,14 +119,6 @@ function findCollidingItems(
     }
 
     return Array.from(hits.values());
-}
-
-function getMaxStack(definition: InventoryItemDefinition): number {
-    const candidate = definition.attributes.stackSize;
-    if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 1) {
-        return Math.floor(candidate);
-    }
-    return 1;
 }
 
 function removeItem(state: InventoryState, itemId: string): void {

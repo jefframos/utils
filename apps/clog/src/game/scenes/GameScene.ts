@@ -18,6 +18,7 @@ import { createEntityDetailsWindow, type EntityInventoryAdapter } from '../ui/En
 import { createEntityFooter, type EntityFooter } from '../ui/EntityFooter';
 import { createBuildPanel, type BuildPanel, type BuildPanelMeta } from '../ui/BuildPanel';
 import type { BuildableEntityType } from '../content/buildables';
+import { addInventoryItem, getInventoryItemDefinition, normalizeInventoryId } from '../inventory/InventoryModel';
 
 export class GameScene {
     private static damagePopupFontInstalled = false;
@@ -52,6 +53,7 @@ export class GameScene {
     private fixedUpdateAccumulatorMs = 0;
     private readonly onWorkerOreDelivered: (amount: number) => void;
     private readonly onPlayerOreCollected: (oreDefinitionId: string, amount: number) => void;
+    private readonly onPlayerDropoffArrived: (homeId: string | null) => void;
     private buildMode: {
         builderEntityId: string;
         selectedBuildableType: BuildableEntityType | null;
@@ -62,6 +64,9 @@ export class GameScene {
     private buildPanel: BuildPanel | null = null;
     private initialBuildPanelState: BuildPanelMeta;
     private pausedWalkingEntityId: string | null = null;
+    private readonly pendingDepositOrders = new Map<string, { storageId: string }>();
+    private readonly tileTooltip: HTMLDivElement;
+    private getTileInfoForDisplay?: (tileX: number, tileY: number) => string | null;
 
     constructor(
         private readonly app: Application,
@@ -72,11 +77,13 @@ export class GameScene {
         private readonly getAvailableOre: () => number = () => 0,
         onWorkerOreDelivered: (amount: number) => void = () => { },
         onPlayerOreCollected: (oreDefinitionId: string, amount: number) => void = () => { },
+        onPlayerDropoffArrived: (homeId: string | null) => void = () => { },
         private readonly inventoryAdapter?: EntityInventoryAdapter,
         initialEntityDetailsWindowState?: EntityDetailsWindowMeta,
         onEntityDetailsWindowStateChange?: (state: EntityDetailsWindowMeta) => void,
         initialBuildPanelState?: BuildPanelMeta,
         onBuildPanelStateChange?: (state: BuildPanelMeta) => void,
+        private readonly onTileClicked?: (tileX: number, tileY: number) => void,
     ) {
         this.initialBuildPanelState = initialBuildPanelState ?? {
             open: false,
@@ -88,6 +95,7 @@ export class GameScene {
         };
         this.onWorkerOreDelivered = onWorkerOreDelivered;
         this.onPlayerOreCollected = onPlayerOreCollected;
+        this.onPlayerDropoffArrived = onPlayerDropoffArrived;
         this.gameCamera = new GameCamera(this.app, this.camera);
         this.viewportSpace = ViewportSpace.initialize(this.app, this.gameCamera);
         this.renderer = new WorldRenderer(this.world, this.worldLayer, this.worldOverlayLayer);
@@ -213,6 +221,12 @@ export class GameScene {
                 }
             },
         });
+
+        // Create tile tooltip
+        this.tileTooltip = document.createElement('div');
+        this.tileTooltip.className = 'tile-tooltip';
+        this.tileTooltip.textContent = 'Tile: move cursor over map';
+        document.body.appendChild(this.tileTooltip);
     }
 
     public getViewportWorldRectTiles(): WorldViewportRect {
@@ -263,6 +277,10 @@ export class GameScene {
                 this.updateDebugOverlay();
             }
         });
+    }
+
+    public setTileInfoDisplayFn(fn: (tileX: number, tileY: number) => string | null): void {
+        this.getTileInfoForDisplay = fn;
     }
 
     public setDebugOverlayEnabled(enabled: boolean): void {
@@ -397,6 +415,9 @@ export class GameScene {
         this.app.stage.on('pointermove', this.onPointerMove, this);
         this.app.stage.on('pointerup', this.onPointerUp, this);
         this.app.stage.on('pointerupoutside', this.onPointerUp, this);
+        this.app.stage.on('pointerout', () => {
+            this.tileTooltip.style.display = 'none';
+        });
 
         // Prevent browser auto-scroll when middle mouse is pressed over the canvas.
         this.app.canvas.addEventListener('mousedown', this.onCanvasMouseDown);
@@ -429,14 +450,20 @@ export class GameScene {
             }
 
             this.clearEntitySelection();
+
+            // Show tile information on click instead of mining
+            const worldPos = this.gameCamera.stageToWorld(event.global);
+            const tx = Math.floor(worldPos.x / TILE_SIZE);
+            const ty = Math.floor(worldPos.y / TILE_SIZE);
+            this.onTileClicked?.(tx, ty);
+
+            // Keep mining state for possible future use but don't mine on click
             this.isPrimaryMining = true;
             this.primaryMiningPointer.copyFrom(event.global);
             this.primaryHoldMineCooldownMs = 0;
             const weapon = this.getPrimaryTool();
             this.onToolSelected(weapon.id);
-            if (weapon.hitOnClick) {
-                this.mineAtPointer(this.primaryMiningPointer, 'click');
-            }
+            // Don't call mineAtPointer - we only show tile info on click now
             return;
         }
 
@@ -459,6 +486,18 @@ export class GameScene {
 
         if (this.isPrimaryMining) {
             this.primaryMiningPointer.copyFrom(event.global);
+        }
+
+        // Update tile tooltip
+        const worldPos = this.gameCamera.stageToWorld(event.global);
+        const tx = Math.floor(worldPos.x / TILE_SIZE);
+        const ty = Math.floor(worldPos.y / TILE_SIZE);
+        const tileInfo = this.getTileInfoForDisplay?.(tx, ty);
+
+        if (tileInfo) {
+            this.tileTooltip.textContent = tileInfo;
+        } else {
+            this.tileTooltip.textContent = 'Tile: outside world bounds';
         }
 
         if (!this.isMiddlePanning) return;
@@ -489,18 +528,19 @@ export class GameScene {
     }
 
     private updateHoldMining(deltaMs: number): void {
-        if (this.isPrimaryMining) {
-            const primary = this.getPrimaryTool();
-            if (primary.hitOnHold && primary.hitsPerSecond > 0) {
-                this.onToolSelected(primary.id);
-                this.primaryHoldMineCooldownMs -= deltaMs;
-                const primaryIntervalMs = 1000 / primary.hitsPerSecond;
-                while (this.primaryHoldMineCooldownMs <= 0) {
-                    this.mineAtPointer(this.primaryMiningPointer, 'hold');
-                    this.primaryHoldMineCooldownMs += primaryIntervalMs;
-                }
-            }
-        }
+        // Hold mining disabled - only entities can destroy tiles now
+        // if (this.isPrimaryMining) {
+        //     const primary = this.getPrimaryTool();
+        //     if (primary.hitOnHold && primary.hitsPerSecond > 0) {
+        //         this.onToolSelected(primary.id);
+        //         this.primaryHoldMineCooldownMs -= deltaMs;
+        //         const primaryIntervalMs = 1000 / primary.hitsPerSecond;
+        //         while (this.primaryHoldMineCooldownMs <= 0) {
+        //             this.mineAtPointer(this.primaryMiningPointer, 'hold');
+        //             this.primaryHoldMineCooldownMs += primaryIntervalMs;
+        //         }
+        //     }
+        // }
     }
 
     private spawnDamagePopups(hits: TileDamageHit[]): void {
@@ -642,6 +682,27 @@ export class GameScene {
                     } : undefined,
                 });
             }
+
+            const clickedIsStorage = !!clickedEntity && clickedEntity.inventoryDef != null && clickedEntity.mobility === 'static';
+            if (clickedIsStorage && clickedEntity && clickedEntity.id !== selectedEntity.id) {
+                const canDeposit = !!selectedEntity.inventoryDef;
+                const hasResources = canDeposit && this.entityHasDepositableResources(selectedEntity);
+                items.push({
+                    id: 'action-deposit-resources',
+                    label: 'Order Deposit Resources',
+                    disabled: !canDeposit || !hasResources,
+                    disabledReason: !canDeposit
+                        ? 'Selected entity has no inventory'
+                        : hasResources
+                            ? undefined
+                            : 'No resources to deposit',
+                    onSelect: hasResources
+                        ? () => {
+                            this.queueDepositResourcesOrder(selectedEntity, clickedEntity);
+                        }
+                        : undefined,
+                });
+            }
         }
 
         // ---------- right-clicked on a deployed worker (not already selected) ----------
@@ -665,6 +726,136 @@ export class GameScene {
             items,
         });
     };
+
+    private entityHasDepositableResources(entity: WorldEntity): boolean {
+        const adapter = this.inventoryAdapter;
+        if (!adapter) return false;
+        const state = adapter.getState();
+        if (!state) return false;
+        const binding = adapter.ensureEntityInventory(entity, state);
+        if (!binding) return false;
+
+        return state.items.some((item) => {
+            if (normalizeInventoryId(item.location.inventoryId) !== binding.inventoryId) return false;
+            const definition = getInventoryItemDefinition(item.definitionId);
+            return !!definition && definition.itemType === 'resource' && item.quantity > 0;
+        });
+    }
+
+    private depositEntityResourcesToStorage(entity: WorldEntity, storage: WorldEntity): void {
+        const adapter = this.inventoryAdapter;
+        if (!adapter) return;
+
+        const state = adapter.getState();
+        if (!state) return;
+
+        const sourceBinding = adapter.ensureEntityInventory(entity, state);
+        const targetBinding = adapter.ensureEntityInventory(storage, state);
+        if (!sourceBinding || !targetBinding) return;
+        if (sourceBinding.inventoryId === targetBinding.inventoryId) return;
+
+        const sourceItems = state.items.filter((item) => normalizeInventoryId(item.location.inventoryId) === sourceBinding.inventoryId);
+        let movedTotal = 0;
+
+        for (const item of sourceItems) {
+            const definition = getInventoryItemDefinition(item.definitionId);
+            if (!definition || definition.itemType !== 'resource') continue;
+            if (item.quantity <= 0) continue;
+
+            const added = addInventoryItem(state, item.definitionId, item.quantity, targetBinding.inventoryId);
+            if (added <= 0) continue;
+
+            item.quantity -= added;
+            movedTotal += added;
+        }
+
+        if (movedTotal <= 0) return;
+
+        state.items = state.items.filter((item) => item.quantity > 0);
+        adapter.onStateChange(state);
+    }
+
+    private queueDepositResourcesOrder(entity: WorldEntity, storage: WorldEntity): void {
+        this.pendingDepositOrders.set(entity.id, { storageId: storage.id });
+        this.tryAdvanceDepositOrder(entity.id);
+    }
+
+    private isEntityInDepositRange(entity: WorldEntity, storage: WorldEntity): boolean {
+        const dx = Math.abs(entity.x - storage.x);
+        const dy = Math.abs(entity.y - storage.y);
+        if (storage.kind === 'base') {
+            return dx <= 3 && dy <= 3;
+        }
+        return Math.max(dx, dy) <= 1;
+    }
+
+    private findDepositApproachTile(entity: WorldEntity, storage: WorldEntity): { x: number; y: number } | null {
+        const reach = storage.kind === 'base' ? 3 : 1;
+        let best: { x: number; y: number; score: number } | null = null;
+
+        for (let oy = -reach; oy <= reach; oy++) {
+            for (let ox = -reach; ox <= reach; ox++) {
+                const tx = storage.x + ox;
+                const ty = storage.y + oy;
+                if (!this.world.canEntityMoveTo(entity.id, tx, ty)) continue;
+                const score = Math.abs(tx - Math.round(entity.x)) + Math.abs(ty - Math.round(entity.y));
+                if (!best || score < best.score) {
+                    best = { x: tx, y: ty, score };
+                }
+            }
+        }
+
+        return best ? { x: best.x, y: best.y } : null;
+    }
+
+    private tryAdvanceDepositOrder(entityId: string): void {
+        const order = this.pendingDepositOrders.get(entityId);
+        if (!order) return;
+
+        const entity = this.world.getEntityById(entityId);
+        const storage = this.world.getEntityById(order.storageId);
+        if (!entity || !storage) {
+            this.pendingDepositOrders.delete(entityId);
+            return;
+        }
+
+        if (!this.entityHasDepositableResources(entity)) {
+            this.pendingDepositOrders.delete(entityId);
+            return;
+        }
+
+        if (this.isEntityInDepositRange(entity, storage)) {
+            this.depositEntityResourcesToStorage(entity, storage);
+            this.pendingDepositOrders.delete(entityId);
+            if (this.selectedEntityId === entity.id) {
+                this.refreshSelectedEntityDetails();
+            }
+            return;
+        }
+
+        if (!entity.walking) {
+            this.pendingDepositOrders.delete(entityId);
+            return;
+        }
+
+        if (entity.movement) {
+            return;
+        }
+
+        const target = this.findDepositApproachTile(entity, storage);
+        if (!target) {
+            return;
+        }
+
+        this.transport.send({ type: 'MoveEntity', entityId: entity.id, x: target.x, y: target.y });
+    }
+
+    private advanceDepositOrders(): void {
+        const orderEntityIds = Array.from(this.pendingDepositOrders.keys());
+        for (const entityId of orderEntityIds) {
+            this.tryAdvanceDepositOrder(entityId);
+        }
+    }
 
     private selectEntityAtPointer(pointer: Point): WorldEntity | null {
         const worldPos = this.gameCamera.stageToWorld(pointer);
@@ -708,6 +899,7 @@ export class GameScene {
 
         while (this.fixedUpdateAccumulatorMs >= GameScene.FIXED_STEP_MS && steps < GameScene.MAX_FIXED_STEPS_PER_FRAME) {
             this.world.tickFixed(GameScene.FIXED_STEP_MS);
+            this.advanceDepositOrders();
             const damageHits = this.world.drainWorkerDamageHits();
             if (damageHits.length > 0) {
                 this.spawnDamagePopups(damageHits);
@@ -720,6 +912,10 @@ export class GameScene {
             const playerOre = this.world.drainPlayerOreCollected();
             for (const { oreDefinitionId, amount } of playerOre) {
                 if (amount > 0) this.onPlayerOreCollected(oreDefinitionId, amount);
+            }
+            const playerDropoffs = this.world.drainPlayerDropoffArrivals();
+            for (const { homeId } of playerDropoffs) {
+                this.onPlayerDropoffArrived(homeId);
             }
             // Refresh selected entity details if entity is mining or moving
             if (this.selectedEntityId) {

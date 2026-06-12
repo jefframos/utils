@@ -150,6 +150,22 @@ export type PlayerActionResult =
     | { ok: true; player: WorldEntity }
     | { ok: false; reason: 'not_found' | 'invalid_target' | 'path_blocked' };
 
+export type EntityActionFailureReason =
+    | 'not_found'
+    | 'not_worker'
+    | 'invalid_building'
+    | 'already_deployed'
+    | 'already_recalled'
+    | 'no_deploy_space'
+    | 'invalid_target'
+    | 'path_blocked'
+    | 'not_movable'
+    | 'not_miner';
+
+export type EntityActionResult =
+    | { ok: true; entity: WorldEntity }
+    | { ok: false; reason: EntityActionFailureReason };
+
 export type SavedBeacon = {
     id: string;
     x: number;
@@ -214,6 +230,7 @@ export class WorldModel {
     private readonly mineReservations = new Map<string, string>();
     private readonly pendingWorkerOreDeliveries: WorkerOreDelivery[] = [];
     private readonly pendingPlayerOreCollected: { amount: number; oreDefinitionId: string }[] = [];
+    private readonly pendingPlayerDropoffArrivals: Array<{ homeId: string | null }> = [];
     private readonly pendingWorkerDamageHits: TileDamageHit[] = [];
     private readonly scanNearestBehavior = new ScanNearestBehavior({
         areaRadius: 9,
@@ -273,6 +290,7 @@ export class WorldModel {
         this.mineReservations.clear();
         this.pendingWorkerOreDeliveries.length = 0;
         this.pendingPlayerOreCollected.length = 0;
+        this.pendingPlayerDropoffArrivals.length = 0;
         this.nextBeaconIndex = 1;
         this.nextWorkerIndex = 1;
         this.widthValue = WORLD_WIDTH;
@@ -416,8 +434,8 @@ export class WorldModel {
                         buildRadius: PLAYER_BUILD_RADIUS,
                         buildables: ['beacon'],
                     };
-                    normalizedEntity.inventoryDef = normalizedEntity.inventoryDef ?? {
-                        capacity: 999,
+                    normalizedEntity.inventoryDef = {
+                        capacity: 12,
                         sharedId: 'main-player',
                     };
                     normalizedEntity.miningDef = normalizedEntity.miningDef ?? {
@@ -447,6 +465,9 @@ export class WorldModel {
                         minePower: normalizedEntity.minePower,
                         mineCooldownMs: normalizedEntity.mineCooldownMs,
                         carryCapacity: normalizedEntity.carryCapacity,
+                    };
+                    normalizedEntity.inventoryDef = normalizedEntity.inventoryDef ?? {
+                        capacity: 1,
                     };
                     const commandListComponent = new CommandListComponent<WorkerEntityCommandType, WorkerEntityCommandPayload>(normalizedEntity.commandList as WorkerEntityCommandList ?? undefined);
                     normalizedEntity.commandList = commandListComponent.snapshot();
@@ -494,6 +515,10 @@ export class WorldModel {
 
     drainPlayerOreCollected(): { amount: number; oreDefinitionId: string }[] {
         return this.pendingPlayerOreCollected.splice(0, this.pendingPlayerOreCollected.length);
+    }
+
+    drainPlayerDropoffArrivals(): Array<{ homeId: string | null }> {
+        return this.pendingPlayerDropoffArrivals.splice(0, this.pendingPlayerDropoffArrivals.length);
     }
 
     drainWorkerDamageHits(): TileDamageHit[] {
@@ -672,6 +697,9 @@ export class WorldModel {
                 mineCooldownMs: definition.mineCooldownMs,
                 carryCapacity: definition.carryCapacity,
             },
+            inventoryDef: {
+                capacity: 1,
+            },
             commandList: CommandListComponent.createEmpty<WorkerEntityCommandType, WorkerEntityCommandPayload>(),
         };
 
@@ -777,11 +805,22 @@ export class WorldModel {
     }
 
     startWorkerMining(workerId: string, x: number, y: number, repeat = true): WorkerActionResult {
-        return this.enqueueWorkerCommand(workerId, { type: 'mine', x, y, repeat }, 'append');
+        const result = this.enqueueEntityCommand(workerId, { type: 'mine', x, y, repeat }, 'append');
+        if (!result.ok) return { ok: false, reason: this.asWorkerFailureReason(result.reason) };
+        return { ok: true, worker: result.entity };
     }
 
     moveWorkerTo(workerId: string, x: number, y: number): WorkerActionResult {
-        return this.enqueueWorkerCommand(workerId, { type: 'move', x, y }, 'append');
+        const result = this.enqueueEntityCommand(workerId, { type: 'move', x, y }, 'append');
+        if (!result.ok) return { ok: false, reason: this.asWorkerFailureReason(result.reason) };
+        return { ok: true, worker: result.entity };
+    }
+
+    moveEntityTo(entityId: string, x: number, y: number): EntityActionResult {
+        const entity = this.entities.get(entityId);
+        if (!entity) return { ok: false, reason: 'not_found' };
+        if (!entity.walking) return { ok: false, reason: 'not_movable' };
+        return this.enqueueEntityCommand(entityId, { type: 'move', x, y }, 'append');
     }
 
     canEntityMoveTo(entityId: string, x: number, y: number): boolean {
@@ -807,82 +846,51 @@ export class WorldModel {
         return this.isMineableFrontierSolid(x, y);
     }
 
+    startEntityMining(entityId: string, x: number, y: number, repeat = true): EntityActionResult {
+        const entity = this.entities.get(entityId);
+        if (!entity) return { ok: false, reason: 'not_found' };
+        if (!entity.miningDef) return { ok: false, reason: 'not_miner' };
+        return this.enqueueEntityCommand(entityId, { type: 'mine', x, y, repeat }, 'append');
+    }
+
     startPlayerMining(x: number, y: number, repeat = true): PlayerActionResult {
         const player = this.getMainPlayerEntity();
-        console.log(`[player:mine] startPlayerMining(${x},${y}) repeat=${repeat}`);
-        if (!player) { console.warn('[player:mine] FAIL – player entity not found'); return { ok: false, reason: 'not_found' }; }
-        if (!player.miningDef) { console.warn('[player:mine] FAIL – player has no miningDef'); return { ok: false, reason: 'invalid_target' }; }
-
-        const commandList = this.getPlayerCommandList(player);
-        commandList.enqueue('mine', { x, y, repeat }, 'append');
-        this.setPlayerCommandList(player, commandList);
-        console.log(`[player:mine] enqueued mine cmd. paused=${player.commandsPaused} hasMovement=${!!player.movement} hasMining=${!!player.mining}`);
-        if (player.commandsPaused) player.commandsPaused = false;
-        this.tryStartNextPlayerCommand(player);
-        const snap = this.getPlayerCommandList(player).snapshot();
-        console.log(`[player:mine] after tryStart: current=${snap.current ? snap.current.type : 'none'} mining=${!!player.mining} movement=${!!player.movement}`);
-        this.markChunkDirtyAt(player.x, player.y);
-        return { ok: true, player: { ...player } };
+        if (!player) return { ok: false, reason: 'not_found' };
+        const result = this.enqueueEntityCommand(player.id, { type: 'mine', x, y, repeat }, 'append');
+        if (!result.ok) return { ok: false, reason: this.asPlayerFailureReason(result.reason) };
+        return { ok: true, player: result.entity };
     }
 
     moveMainPlayerTo(x: number, y: number): PlayerActionResult {
         const player = this.getMainPlayerEntity();
-        if (!player) {
-            return { ok: false, reason: 'not_found' };
-        }
-
-        this.ensureWorldContainsTile(x, y);
-        const tile = this.getTile(x, y);
-        if (!tile || tile.solid || tile.visibility === 'Unknown') {
-            return { ok: false, reason: 'invalid_target' };
-        }
-        if (this.isEntityOccupied(x, y, player.id)) {
-            return { ok: false, reason: 'invalid_target' };
-        }
-
-        const commandList = this.getPlayerCommandList(player);
-        commandList.enqueue('move', { x, y }, 'append');
-        this.setPlayerCommandList(player, commandList);
-        this.tryStartNextPlayerCommand(player);
-        this.markChunkDirtyAt(player.x, player.y);
-        return { ok: true, player: { ...player } };
+        if (!player) return { ok: false, reason: 'not_found' };
+        const result = this.enqueueEntityCommand(player.id, { type: 'move', x, y }, 'append');
+        if (!result.ok) return { ok: false, reason: this.asPlayerFailureReason(result.reason) };
+        return { ok: true, player: result.entity };
     }
 
     removeQueuedPlayerCommand(commandId: string): { ok: true } | { ok: false; reason: 'not_found' } {
         const player = this.getMainPlayerEntity();
         if (!player) return { ok: false, reason: 'not_found' };
-
-        const commandList = this.getPlayerCommandList(player);
-        const removed = commandList.removeQueued(commandId);
-        if (!removed) return { ok: false, reason: 'not_found' };
-        this.setPlayerCommandList(player, commandList);
-        this.markChunkDirtyAt(player.x, player.y);
+        const removed = this.removeQueuedEntityCommand(player.id, commandId);
+        if (!removed.ok) return { ok: false, reason: 'not_found' };
         return { ok: true };
     }
 
     interruptPlayerCommand(): PlayerActionResult {
         const player = this.getMainPlayerEntity();
         if (!player) return { ok: false, reason: 'not_found' };
-        player.movement = null;
-        if (player.mining) this.clearWorkerMining(player);
-        this.completeCurrentPlayerCommand(player);
-        player.commandsPaused = false;
-        this.tryStartNextPlayerCommand(player);
-        this.markChunkDirtyAt(player.x, player.y);
-        return { ok: true, player: { ...player } };
+        const result = this.interruptEntityCommand(player.id);
+        if (!result.ok) return { ok: false, reason: this.asPlayerFailureReason(result.reason) };
+        return { ok: true, player: result.entity };
     }
 
     clearPlayerCommands(): PlayerActionResult {
         const player = this.getMainPlayerEntity();
         if (!player) return { ok: false, reason: 'not_found' };
-        player.movement = null;
-        if (player.mining) this.clearWorkerMining(player);
-        player.commandsPaused = false;
-        const commandList = this.getPlayerCommandList(player);
-        commandList.clearAll();
-        this.setPlayerCommandList(player, commandList);
-        this.markChunkDirtyAt(player.x, player.y);
-        return { ok: true, player: { ...player } };
+        const result = this.clearEntityCommands(player.id);
+        if (!result.ok) return { ok: false, reason: this.asPlayerFailureReason(result.reason) };
+        return { ok: true, player: result.entity };
     }
 
     pausePlayerCommands(): PlayerActionResult {
@@ -897,7 +905,7 @@ export class WorldModel {
         const player = this.getMainPlayerEntity();
         if (!player) return { ok: false, reason: 'not_found' };
         player.commandsPaused = false;
-        this.tryStartNextPlayerCommand(player);
+        this.tryStartNextEntityCommand(player);
         this.markChunkDirtyAt(player.x, player.y);
         return { ok: true, player: { ...player } };
     }
@@ -917,73 +925,35 @@ export class WorldModel {
         if (!worker) return { ok: false, reason: 'not_found' };
         if (worker.kind !== 'worker') return { ok: false, reason: 'not_worker' };
         worker.commandsPaused = false;
-        this.tryStartNextWorkerCommand(worker);
+        this.tryStartNextEntityCommand(worker);
         this.markChunkDirtyAt(worker.x, worker.y);
         return { ok: true, worker: { ...worker } };
     }
 
     enqueueWorkerCommand(workerId: string, command: { type: WorkerEntityCommandType; x?: number; y?: number; repeat?: boolean }, mode: EnqueueMode = 'append'): WorkerActionResult {
-        const worker = this.entities.get(workerId);
-        if (!worker) return { ok: false, reason: 'not_found' };
-        if (worker.kind !== 'worker') return { ok: false, reason: 'not_worker' };
-        if (command.type === 'move' || command.type === 'mine') {
-            if (!worker.deployed) return { ok: false, reason: 'already_recalled' };
-            if (!Number.isFinite(command.x) || !Number.isFinite(command.y)) return { ok: false, reason: 'invalid_target' };
-        }
-        const commandList = this.getWorkerCommandList(worker);
-        if (mode === 'replace') {
-            commandList.interruptCurrent();
-            commandList.clearAll();
-            this.clearWorkerMining(worker);
-            this.clearWorkerMovement(worker);
-        }
-        commandList.enqueue(command.type, { x: command.x, y: command.y, repeat: command.repeat }, 'append');
-        this.setWorkerCommandList(worker, commandList);
-        if (worker.commandsPaused) worker.commandsPaused = false;
-        this.tryStartNextWorkerCommand(worker);
-        this.markChunkDirtyAt(worker.x, worker.y);
-        return { ok: true, worker: { ...worker } };
+        const result = this.enqueueEntityCommand(workerId, command, mode);
+        if (!result.ok) return { ok: false, reason: this.asWorkerFailureReason(result.reason) };
+        return { ok: true, worker: result.entity };
     }
 
     interruptWorkerCommand(workerId: string): WorkerActionResult {
-        const worker = this.entities.get(workerId);
-        if (!worker) return { ok: false, reason: 'not_found' };
-        if (worker.kind !== 'worker') return { ok: false, reason: 'not_worker' };
-        const commandList = this.getWorkerCommandList(worker);
-        if (!commandList.snapshot().current && !worker.mining && !worker.movement) return { ok: false, reason: 'already_recalled' };
-        commandList.interruptCurrent();
-        this.setWorkerCommandList(worker, commandList);
-        this.clearWorkerMining(worker);
-        this.clearWorkerMovement(worker);
-        worker.commandsPaused = false;
-        this.tryStartNextWorkerCommand(worker);
-        this.markChunkDirtyAt(worker.x, worker.y);
-        return { ok: true, worker: { ...worker } };
+        const result = this.interruptEntityCommand(workerId);
+        if (!result.ok) return { ok: false, reason: this.asWorkerFailureReason(result.reason) };
+        return { ok: true, worker: result.entity };
     }
 
     clearWorkerCommands(workerId: string): WorkerActionResult {
-        const worker = this.entities.get(workerId);
-        if (!worker) return { ok: false, reason: 'not_found' };
-        if (worker.kind !== 'worker') return { ok: false, reason: 'not_worker' };
-        const commandList = this.getWorkerCommandList(worker);
-        commandList.clearAll();
-        this.setWorkerCommandList(worker, commandList);
-        this.clearWorkerMining(worker);
-        this.clearWorkerMovement(worker);
-        this.markChunkDirtyAt(worker.x, worker.y);
-        return { ok: true, worker: { ...worker } };
+        const result = this.clearEntityCommands(workerId);
+        if (!result.ok) return { ok: false, reason: this.asWorkerFailureReason(result.reason) };
+        return { ok: true, worker: result.entity };
     }
 
     removeQueuedWorkerCommand(workerId: string, commandId: string): WorkerActionResult {
-        const worker = this.entities.get(workerId);
-        if (!worker) return { ok: false, reason: 'not_found' };
-        if (worker.kind !== 'worker') return { ok: false, reason: 'not_worker' };
-        const commandList = this.getWorkerCommandList(worker);
-        const removed = commandList.removeQueued(commandId);
-        if (!removed) return { ok: false, reason: 'invalid_target' };
-        this.setWorkerCommandList(worker, commandList);
-        this.markChunkDirtyAt(worker.x, worker.y);
-        return { ok: true, worker: { ...worker } };
+        const entity = this.entities.get(workerId);
+        if (!entity || entity.kind !== 'worker') return { ok: false, reason: !entity ? 'not_found' : 'not_worker' };
+        const removed = this.removeQueuedEntityCommand(workerId, commandId);
+        if (!removed.ok) return { ok: false, reason: 'invalid_target' };
+        return { ok: true, worker: { ...entity } };
     }
 
     private beginMoveWorkerTo(worker: WorldEntity, x: number, y: number): WorkerActionResult {
@@ -1136,7 +1106,7 @@ export class WorldModel {
             const previousX = entity.x;
             const previousY = entity.y;
 
-            this.tryStartNextWorkerCommand(entity);
+            this.tryStartNextEntityCommand(entity);
 
             if (!entity.commandsPaused && entity.movement) {
                 const speed = Math.max(0.1, entity.walking?.speedTilesPerSecond ?? entity.moveSpeedTilesPerSecond ?? getWorkerDefinition(entity.unitType ?? 'basic-worker').moveSpeedTilesPerSecond);
@@ -1200,25 +1170,25 @@ export class WorldModel {
                                 this.clearWorkerMining(entity);
                                 entity.deployed = true;
                                 entity.parentId = null;
-                                this.completeCurrentWorkerCommand(entity);
+                                this.completeCurrentEntityCommand(entity);
 
                                 if (repeatMining) {
                                     // Only re-enqueue the cycle if the queue is empty.
                                     // If other commands were added while this cycle was running,
                                     // they take over as the new active cycle instead of reverting.
-                                    const commandList = this.getWorkerCommandList(entity);
+                                    const commandList = this.getEntityCommandList(entity);
                                     if (commandList.snapshot().queue.length === 0) {
                                         commandList.enqueue('mine', { x: repeatAnchorX, y: repeatAnchorY, repeat: true }, 'append');
-                                        this.setWorkerCommandList(entity, commandList);
+                                        this.setEntityCommandList(entity, commandList);
                                     }
                                 }
 
-                                this.tryStartNextWorkerCommand(entity);
+                                this.tryStartNextEntityCommand(entity);
                             } else {
                                 entity.deployed = false;
                                 entity.parentId = home.id;
-                                this.completeCurrentWorkerCommand(entity);
-                                this.tryStartNextWorkerCommand(entity);
+                                this.completeCurrentEntityCommand(entity);
+                                this.tryStartNextEntityCommand(entity);
                             }
                         }
                     } else if (movementMode === 'move') {
@@ -1229,19 +1199,19 @@ export class WorldModel {
                             // where the snapshot was taken during an approach movement before mining
                             // state was set. Re-activate mining from the current position so the command
                             // isn't incorrectly discarded.
-                            const cmdList = this.getWorkerCommandList(entity);
+                            const cmdList = this.getEntityCommandList(entity);
                             const currentCmd = cmdList.snapshot().current;
                             if (currentCmd?.type === 'mine' && Number.isFinite(currentCmd.payload.x) && Number.isFinite(currentCmd.payload.y)) {
                                 const result = this.beginWorkerMining(entity, Number(currentCmd.payload.x), Number(currentCmd.payload.y), currentCmd.payload.repeat !== false);
                                 if (!result.ok) {
                                     // Target gone â€” give up and advance queue.
-                                    this.completeCurrentWorkerCommand(entity);
-                                    this.tryStartNextWorkerCommand(entity);
+                                    this.completeCurrentEntityCommand(entity);
+                                    this.tryStartNextEntityCommand(entity);
                                 }
                                 // beginWorkerMining sets entity.mining â€” next tick the mining loop takes over.
                             } else {
-                                this.completeCurrentWorkerCommand(entity);
-                                this.tryStartNextWorkerCommand(entity);
+                                this.completeCurrentEntityCommand(entity);
+                                this.tryStartNextEntityCommand(entity);
                             }
                         }
                     }
@@ -1264,8 +1234,8 @@ export class WorldModel {
 
                         if (!plan) {
                             this.clearWorkerMining(entity);
-                            this.completeCurrentWorkerCommand(entity);
-                            this.tryStartNextWorkerCommand(entity);
+                            this.completeCurrentEntityCommand(entity);
+                            this.tryStartNextEntityCommand(entity);
                         } else if (this.reserveMineTarget(plan.targetX, plan.targetY, entity.id)) {
                             mining.targetX = plan.targetX;
                             mining.targetY = plan.targetY;
@@ -1286,8 +1256,8 @@ export class WorldModel {
                         const tool = entity.toolId ? getToolDefinition(entity.toolId) : undefined;
                         if (!tool) {
                             this.clearWorkerMining(entity);
-                            this.completeCurrentWorkerCommand(entity);
-                            this.tryStartNextWorkerCommand(entity);
+                            this.completeCurrentEntityCommand(entity);
+                            this.tryStartNextEntityCommand(entity);
                         } else if (entity.mining.cooldownMs > 0) {
                             entity.mining.cooldownMs = Math.max(0, entity.mining.cooldownMs - deltaMs);
                         } else {
@@ -1317,8 +1287,8 @@ export class WorldModel {
                             if (!hit) {
                                 this.releaseMineTarget(entity.mining.targetX, entity.mining.targetY, entity.id);
                                 this.clearWorkerMining(entity);
-                                this.completeCurrentWorkerCommand(entity);
-                                this.tryStartNextWorkerCommand(entity);
+                                this.completeCurrentEntityCommand(entity);
+                                this.tryStartNextEntityCommand(entity);
                             } else {
                                 this.pendingWorkerDamageHits.push(hit);
                                 const toolCadenceMs = Math.max(60, Math.round(1000 / Math.max(0.1, tool.hitsPerSecond)));
@@ -1425,6 +1395,8 @@ export class WorldModel {
             const previousY = player.y;
 
             if (!player.commandsPaused && player.movement) {
+                const movementMode = player.movement.mode;
+                const returnHomeId = movementMode === 'return' ? (player.movement.homeId ?? null) : null;
                 const speed = Math.max(0.1, player.walking?.speedTilesPerSecond ?? player.moveSpeedTilesPerSecond ?? PLAYER_MOVE_SPEED_TILES_PER_SECOND);
                 let remainingTiles = (speed * deltaMs) / 1000;
 
@@ -1455,16 +1427,21 @@ export class WorldModel {
                 }
 
                 if (player.movement.stepIndex >= player.movement.path.length) {
-                    const wasApproach = player.movement.mode === 'move' && player.mining != null;
+                    const wasApproach = movementMode === 'move' && player.mining != null;
+                    const wasReturn = movementMode === 'return' && player.mining != null;
                     player.movement = null;
-                    if (!wasApproach) {
+                    if (wasReturn && player.mining) {
+                        // Returning to a dropoff point empties carried load and resumes mining command.
+                        this.pendingPlayerDropoffArrivals.push({ homeId: returnHomeId });
+                        player.mining.carriedOre = 0;
+                    } else if (!wasApproach) {
                         // Only complete a move command; approach to mining position is handled by mining tick.
-                        this.completeCurrentPlayerCommand(player);
-                        this.tryStartNextPlayerCommand(player);
+                        this.completeCurrentEntityCommand(player);
+                        this.tryStartNextEntityCommand(player);
                     }
                 }
             } else if (!player.commandsPaused) {
-                this.tryStartNextPlayerCommand(player);
+                this.tryStartNextEntityCommand(player);
             }
 
             // Player mining tick — mirrors worker mining but collects ore directly (no carry/return cycle).
@@ -1482,8 +1459,8 @@ export class WorldModel {
                     });
                     if (!plan) {
                         this.clearWorkerMining(player);
-                        this.completeCurrentPlayerCommand(player);
-                        this.tryStartNextPlayerCommand(player);
+                        this.completeCurrentEntityCommand(player);
+                        this.tryStartNextEntityCommand(player);
                     } else if (this.reserveMineTarget(plan.targetX, plan.targetY, player.id)) {
                         mining.targetX = plan.targetX;
                         mining.targetY = plan.targetY;
@@ -1499,18 +1476,34 @@ export class WorldModel {
                     const tool = player.toolId ? getToolDefinition(player.toolId) : undefined;
                     if (!tool) {
                         this.clearWorkerMining(player);
-                        this.completeCurrentPlayerCommand(player);
-                        this.tryStartNextPlayerCommand(player);
+                        this.completeCurrentEntityCommand(player);
+                        this.tryStartNextEntityCommand(player);
                     } else if (mining.cooldownMs > 0) {
                         mining.cooldownMs = Math.max(0, mining.cooldownMs - deltaMs);
                     } else {
-                        const rawDamage = Math.max(1, Math.floor(tool.tileDamage * Math.max(1, player.minePower ?? 1)));
+                        const inventorySlots = Math.max(1, player.inventoryDef?.capacity ?? 1);
+                        const configuredCarryLimit = Math.max(1, player.miningDef?.carryCapacity ?? player.carryCapacity ?? ORE_UNITS_PER_SLOT);
+                        const totalCapacity = Math.max(configuredCarryLimit, inventorySlots * ORE_UNITS_PER_SLOT);
+                        const carried = mining.carriedOre ?? 0;
+                        const availableCapacity = Math.max(0, totalCapacity - carried);
+
+                        let rawDamage = Math.max(1, Math.floor(tool.tileDamage * Math.max(1, player.minePower ?? 1)));
+                        if (availableCapacity < rawDamage * 2) {
+                            const tile = this.getTile(mining.targetX, mining.targetY);
+                            if (tile) {
+                                const biomeDef = BIOME_DEFINITIONS[tile.biome];
+                                const avgOre = (biomeDef.oreYield[0] + biomeDef.oreYield[1]) / 2;
+                                const orePerHp = Math.max(1, avgOre / biomeDef.defaultHp);
+                                rawDamage = Math.ceil(Math.min(rawDamage, availableCapacity / orePerHp));
+                            }
+                        }
+
                         const hit = this.mineSingleAt(mining.targetX, mining.targetY, rawDamage);
                         if (!hit) {
                             this.releaseMineTarget(mining.targetX, mining.targetY, player.id);
                             this.clearWorkerMining(player);
-                            this.completeCurrentPlayerCommand(player);
-                            this.tryStartNextPlayerCommand(player);
+                            this.completeCurrentEntityCommand(player);
+                            this.tryStartNextEntityCommand(player);
                         } else {
                             this.pendingWorkerDamageHits.push(hit);
                             const toolCadenceMs = Math.max(60, Math.round(1000 / Math.max(0.1, tool.hitsPerSecond)));
@@ -1518,9 +1511,32 @@ export class WorldModel {
                             mining.cooldownMs = entityCadenceMs > 0 ? Math.min(entityCadenceMs, toolCadenceMs) : toolCadenceMs;
                             mining.miningProgressMs += deltaMs;
 
-                            if (hit.oreYield > 0) {
-                                // Player collects ore immediately — no carry/return cycle.
-                                this.pendingPlayerOreCollected.push({ amount: hit.oreYield, oreDefinitionId: hit.oreDefinitionId });
+                            const remainingCapacity = Math.max(0, totalCapacity - mining.carriedOre);
+                            const oreGain = Math.max(0, Math.min(hit.oreYield ?? 0, remainingCapacity));
+                            if (oreGain > 0) {
+                                mining.carriedOre += oreGain;
+                                // Keep existing collection pipeline, but cap by carried capacity.
+                                this.pendingPlayerOreCollected.push({ amount: oreGain, oreDefinitionId: hit.oreDefinitionId });
+                            }
+
+                            const inventoryNowFull = mining.carriedOre >= totalCapacity;
+                            if (inventoryNowFull) {
+                                const home = this.findNearestStaticDropoffEntity(player.x, player.y) ?? this.getBaseEntity();
+                                if (home) {
+                                    const returnTarget = this.findNearestDropoffTile(home, player.x, player.y);
+                                    if (returnTarget) {
+                                        const path = this.findOpenPath(player.x, player.y, returnTarget.x, returnTarget.y, 15000);
+                                        if (path) {
+                                            player.movement = {
+                                                path,
+                                                stepIndex: 1,
+                                                progress: 0,
+                                                mode: 'return',
+                                                homeId: home.id,
+                                            };
+                                        }
+                                    }
+                                }
                             }
 
                             if (hit.opened) {
@@ -1528,38 +1544,40 @@ export class WorldModel {
                                 mining.lastMinedY = mining.targetY;
                                 this.releaseMineTarget(mining.targetX, mining.targetY, player.id);
 
-                                const nextPlan = this.findClosestMineTargetPlan(player, {
-                                    anchorX: mining.lastMinedX,
-                                    anchorY: mining.lastMinedY,
-                                    lastMinedX: mining.lastMinedX,
-                                    lastMinedY: mining.lastMinedY,
-                                });
+                                if (!inventoryNowFull) {
+                                    const nextPlan = this.findClosestMineTargetPlan(player, {
+                                        anchorX: mining.lastMinedX,
+                                        anchorY: mining.lastMinedY,
+                                        lastMinedX: mining.lastMinedX,
+                                        lastMinedY: mining.lastMinedY,
+                                    });
 
-                                if (nextPlan && this.reserveMineTarget(nextPlan.targetX, nextPlan.targetY, player.id)) {
-                                    mining.targetX = nextPlan.targetX;
-                                    mining.targetY = nextPlan.targetY;
-                                    mining.approachX = nextPlan.approachX;
-                                    mining.approachY = nextPlan.approachY;
-                                    mining.anchorX = nextPlan.anchorX;
-                                    mining.anchorY = nextPlan.anchorY;
-                                    mining.cooldownMs = 0;
-                                    mining.miningProgressMs = 0;
-                                    player.movement = { path: nextPlan.path, stepIndex: 1, progress: 0, mode: 'move' };
-                                } else if (mining.repeat) {
-                                    const repeatX = mining.lastMinedX;
-                                    const repeatY = mining.lastMinedY;
-                                    this.clearWorkerMining(player);
-                                    const cmdList = this.getPlayerCommandList(player);
-                                    cmdList.completeCurrent();
-                                    if (cmdList.snapshot().queue.length === 0) {
-                                        cmdList.enqueue('mine', { x: repeatX, y: repeatY, repeat: true }, 'append');
+                                    if (nextPlan && this.reserveMineTarget(nextPlan.targetX, nextPlan.targetY, player.id)) {
+                                        mining.targetX = nextPlan.targetX;
+                                        mining.targetY = nextPlan.targetY;
+                                        mining.approachX = nextPlan.approachX;
+                                        mining.approachY = nextPlan.approachY;
+                                        mining.anchorX = nextPlan.anchorX;
+                                        mining.anchorY = nextPlan.anchorY;
+                                        mining.cooldownMs = 0;
+                                        mining.miningProgressMs = 0;
+                                        player.movement = { path: nextPlan.path, stepIndex: 1, progress: 0, mode: 'move' };
+                                    } else if (mining.repeat) {
+                                        const repeatX = mining.lastMinedX;
+                                        const repeatY = mining.lastMinedY;
+                                        this.clearWorkerMining(player);
+                                        const cmdList = this.getEntityCommandList(player);
+                                        cmdList.completeCurrent();
+                                        if (cmdList.snapshot().queue.length === 0) {
+                                            cmdList.enqueue('mine', { x: repeatX, y: repeatY, repeat: true }, 'append');
+                                        }
+                                        this.setEntityCommandList(player, cmdList);
+                                        this.tryStartNextEntityCommand(player);
+                                    } else {
+                                        this.clearWorkerMining(player);
+                                        this.completeCurrentEntityCommand(player);
+                                        this.tryStartNextEntityCommand(player);
                                     }
-                                    this.setPlayerCommandList(player, cmdList);
-                                    this.tryStartNextPlayerCommand(player);
-                                } else {
-                                    this.clearWorkerMining(player);
-                                    this.completeCurrentPlayerCommand(player);
-                                    this.tryStartNextPlayerCommand(player);
                                 }
                             }
                         }
@@ -2507,6 +2525,9 @@ export class WorldModel {
             existing.mobility = 'static';
             existing.kind = 'base';
             existing.parentId = null;
+            existing.inventoryDef = existing.inventoryDef ?? {
+                capacity: 48,
+            };
             return;
         }
 
@@ -2518,11 +2539,29 @@ export class WorldModel {
             y: this.baseYValue,
             visibilityRadius: BASE_VISIBILITY_RADIUS,
             parentId: null,
+            inventoryDef: {
+                capacity: 48,
+            },
         });
     }
 
     private getBaseEntity(): WorldEntity | null {
         return this.entities.get(BASE_ENTITY_ID) ?? null;
+    }
+
+    private findNearestStaticDropoffEntity(fromX: number, fromY: number): WorldEntity | null {
+        let nearest: WorldEntity | null = null;
+        let nearestDistance = Number.POSITIVE_INFINITY;
+        for (const entity of this.entities.values()) {
+            if (entity.mobility !== 'static') continue;
+            if (entity.kind !== 'base' && entity.kind !== 'beacon') continue;
+            const distance = Math.hypot(entity.x - fromX, entity.y - fromY);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = entity;
+            }
+        }
+        return nearest;
     }
 
     private ensureMainPlayerEntity(): void {
@@ -2542,8 +2581,8 @@ export class WorldModel {
                 buildRadius: PLAYER_BUILD_RADIUS,
                 buildables: ['beacon'],
             };
-            existing.inventoryDef = existing.inventoryDef ?? {
-                capacity: 999,
+            existing.inventoryDef = {
+                capacity: 12,
                 sharedId: 'main-player',
             };
             existing.miningDef = existing.miningDef ?? {
@@ -2577,7 +2616,7 @@ export class WorldModel {
                 buildables: ['beacon'],
             },
             inventoryDef: {
-                capacity: 999,
+                capacity: 12,
                 sharedId: 'main-player',
             },
             miningDef: {
@@ -2883,115 +2922,34 @@ export class WorldModel {
         worker.movement = null;
     }
 
-    private getWorkerCommandList(worker: WorldEntity): CommandListComponent<WorkerEntityCommandType, WorkerEntityCommandPayload> {
-        return new CommandListComponent<WorkerEntityCommandType, WorkerEntityCommandPayload>(worker.commandList as WorkerEntityCommandList ?? undefined);
+    private getEntityCommandList(entity: WorldEntity): CommandListComponent<'move' | 'mine' | 'recall', { x?: number; y?: number; repeat?: boolean }> {
+        return new CommandListComponent<'move' | 'mine' | 'recall', { x?: number; y?: number; repeat?: boolean }>(
+            entity.commandList as CommandListState<'move' | 'mine' | 'recall', { x?: number; y?: number; repeat?: boolean }> ?? undefined,
+        );
     }
 
-    private setWorkerCommandList(worker: WorldEntity, commandList: CommandListComponent<WorkerEntityCommandType, WorkerEntityCommandPayload>): void {
-        worker.commandList = commandList.snapshot();
+    private setEntityCommandList(entity: WorldEntity, commandList: CommandListComponent<'move' | 'mine' | 'recall', { x?: number; y?: number; repeat?: boolean }>): void {
+        entity.commandList = commandList.snapshot();
     }
 
-    private getPlayerCommandList(player: WorldEntity): CommandListComponent<PlayerEntityCommandType, PlayerEntityCommandPayload> {
-        return new CommandListComponent<PlayerEntityCommandType, PlayerEntityCommandPayload>(player.commandList as PlayerEntityCommandList ?? undefined);
-    }
-
-    private setPlayerCommandList(player: WorldEntity, commandList: CommandListComponent<PlayerEntityCommandType, PlayerEntityCommandPayload>): void {
-        player.commandList = commandList.snapshot();
-    }
-
-    private completeCurrentPlayerCommand(player: WorldEntity): void {
-        const commandList = this.getPlayerCommandList(player);
+    private completeCurrentEntityCommand(entity: WorldEntity): void {
+        const commandList = this.getEntityCommandList(entity);
         commandList.completeCurrent();
-        this.setPlayerCommandList(player, commandList);
+        this.setEntityCommandList(entity, commandList);
     }
 
-    private tryStartNextPlayerCommand(player: WorldEntity): void {
-        if (player.movement) { console.log('[player:tryStart] skip – already moving'); return; }
-        if (player.mining) { console.log('[player:tryStart] skip – already mining'); return; }
-        if (player.commandsPaused) { console.log('[player:tryStart] skip – commands paused'); return; }
+    private tryStartNextEntityCommand(entity: WorldEntity): void {
+        if (entity.movement || entity.mining) return;
+        if (entity.commandsPaused) return;
 
-        const commandList = this.getPlayerCommandList(player);
-        const state = commandList.snapshot();
-        if (state.current) { console.log(`[player:tryStart] skip – current cmd already active: ${state.current.type}`); return; }
-
-        while (true) {
-            const next = commandList.shiftNext();
-            if (!next) {
-                console.log('[player:tryStart] queue empty, nothing to start');
-                this.setPlayerCommandList(player, commandList);
-                return;
-            }
-
-            console.log(`[player:tryStart] dequeued cmd: ${next.type} payload=${JSON.stringify(next.payload)}`);
-
-            if (next.type === 'mine') {
-                if (!Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
-                    console.warn('[player:tryStart] mine cmd has invalid coords, skipping');
-                    commandList.completeCurrent();
-                    continue;
-                }
-                const tx = Number(next.payload.x);
-                const ty = Number(next.payload.y);
-                const frontierOk = this.isMineableFrontierSolid(tx, ty);
-                console.log(`[player:tryStart] mine target=(${tx},${ty}) isFrontierSolid=${frontierOk} playerPos=(${player.x.toFixed(1)},${player.y.toFixed(1)})`);
-                const result = this.beginWorkerMining(player, tx, ty, next.payload.repeat !== false);
-                console.log(`[player:tryStart] beginWorkerMining => ok=${result.ok}${'reason' in result ? ` reason=${result.reason}` : ''}`);
-                if (result.ok) {
-                    this.setPlayerCommandList(player, commandList);
-                    return;
-                }
-                commandList.completeCurrent();
-                continue;
-            }
-
-            if (next.type !== 'move' || !Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
-                console.warn(`[player:tryStart] unknown/invalid cmd type "${next.type}", skipping`);
-                commandList.completeCurrent();
-                continue;
-            }
-
-            const tx = Number(next.payload.x);
-            const ty = Number(next.payload.y);
-
-            this.ensureWorldContainsTile(tx, ty);
-            const tile = this.getTile(tx, ty);
-            if (!tile) { console.warn(`[player:tryStart] move target (${tx},${ty}) – tile not found`); commandList.completeCurrent(); continue; }
-            if (tile.solid) { console.warn(`[player:tryStart] move target (${tx},${ty}) – tile is solid`); commandList.completeCurrent(); continue; }
-            if (tile.visibility === 'Unknown') { console.warn(`[player:tryStart] move target (${tx},${ty}) – tile unknown`); commandList.completeCurrent(); continue; }
-            if (this.isEntityOccupied(tx, ty, player.id)) { console.warn(`[player:tryStart] move target (${tx},${ty}) – occupied`); commandList.completeCurrent(); continue; }
-
-            const path = this.findOpenPath(player.x, player.y, tx, ty, 20000);
-            if (!path || path.length <= 1) {
-                console.warn(`[player:tryStart] move target (${tx},${ty}) – no path found`);
-                commandList.completeCurrent();
-                continue;
-            }
-
-            console.log(`[player:tryStart] starting move to (${tx},${ty}) path length=${path.length}`);
-            player.movement = { path, stepIndex: 1, progress: 0, mode: 'move' };
-            this.setPlayerCommandList(player, commandList);
-            return;
-        }
-    }
-
-    private completeCurrentWorkerCommand(worker: WorldEntity): void {
-        const commandList = this.getWorkerCommandList(worker);
-        commandList.completeCurrent();
-        this.setWorkerCommandList(worker, commandList);
-    }
-
-    private tryStartNextWorkerCommand(worker: WorldEntity): void {
-        if (worker.movement || worker.mining) return;
-        if (worker.commandsPaused) return;
-
-        const commandList = this.getWorkerCommandList(worker);
+        const commandList = this.getEntityCommandList(entity);
         const state = commandList.snapshot();
         if (state.current) return;
 
         while (true) {
             const next = commandList.shiftNext();
             if (!next) {
-                this.setWorkerCommandList(worker, commandList);
+                this.setEntityCommandList(entity, commandList);
                 return;
             }
 
@@ -3000,25 +2958,123 @@ export class WorldModel {
                 if (!Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
                     result = { ok: false, reason: 'invalid_target' };
                 } else {
-                    result = this.beginMoveWorkerTo(worker, Number(next.payload.x), Number(next.payload.y));
+                    result = this.beginMoveWorkerTo(entity, Number(next.payload.x), Number(next.payload.y));
                 }
             } else if (next.type === 'mine') {
                 if (!Number.isFinite(next.payload.x) || !Number.isFinite(next.payload.y)) {
                     result = { ok: false, reason: 'invalid_target' };
                 } else {
-                    result = this.beginWorkerMining(worker, Number(next.payload.x), Number(next.payload.y), next.payload.repeat !== false);
+                    result = this.beginWorkerMining(entity, Number(next.payload.x), Number(next.payload.y), next.payload.repeat !== false);
                 }
             } else {
-                result = this.beginRecallWorker(worker);
+                result = this.beginRecallWorker(entity);
             }
 
             if (result.ok) {
-                this.setWorkerCommandList(worker, commandList);
+                this.setEntityCommandList(entity, commandList);
                 return;
             }
 
             commandList.completeCurrent();
         }
+    }
+
+    private enqueueEntityCommand(
+        entityId: string,
+        command: { type: 'move' | 'mine' | 'recall'; x?: number; y?: number; repeat?: boolean },
+        mode: EnqueueMode = 'append',
+    ): EntityActionResult {
+        const entity = this.entities.get(entityId);
+        if (!entity) return { ok: false, reason: 'not_found' };
+
+        if (command.type === 'move') {
+            if (!entity.walking) return { ok: false, reason: 'not_movable' };
+            if (!Number.isFinite(command.x) || !Number.isFinite(command.y)) return { ok: false, reason: 'invalid_target' };
+        }
+
+        if (command.type === 'mine') {
+            if (!entity.miningDef) return { ok: false, reason: 'not_miner' };
+            if (!Number.isFinite(command.x) || !Number.isFinite(command.y)) return { ok: false, reason: 'invalid_target' };
+        }
+
+        if (command.type === 'recall' && entity.kind !== 'worker') {
+            return { ok: false, reason: 'invalid_target' };
+        }
+
+        if (entity.kind === 'worker' && (command.type === 'move' || command.type === 'mine') && !entity.deployed) {
+            return { ok: false, reason: 'already_recalled' };
+        }
+
+        const commandList = this.getEntityCommandList(entity);
+        if (mode === 'replace') {
+            commandList.interruptCurrent();
+            commandList.clearAll();
+            this.clearWorkerMining(entity);
+            this.clearWorkerMovement(entity);
+        }
+
+        commandList.enqueue(command.type, { x: command.x, y: command.y, repeat: command.repeat }, 'append');
+        this.setEntityCommandList(entity, commandList);
+        if (entity.commandsPaused) entity.commandsPaused = false;
+        this.tryStartNextEntityCommand(entity);
+        this.markChunkDirtyAt(entity.x, entity.y);
+        return { ok: true, entity: { ...entity } };
+    }
+
+    private interruptEntityCommand(entityId: string): EntityActionResult {
+        const entity = this.entities.get(entityId);
+        if (!entity) return { ok: false, reason: 'not_found' };
+        const commandList = this.getEntityCommandList(entity);
+        if (!commandList.snapshot().current && !entity.mining && !entity.movement) {
+            return { ok: false, reason: 'already_recalled' };
+        }
+
+        commandList.interruptCurrent();
+        this.setEntityCommandList(entity, commandList);
+        this.clearWorkerMining(entity);
+        this.clearWorkerMovement(entity);
+        entity.commandsPaused = false;
+        this.tryStartNextEntityCommand(entity);
+        this.markChunkDirtyAt(entity.x, entity.y);
+        return { ok: true, entity: { ...entity } };
+    }
+
+    private clearEntityCommands(entityId: string): EntityActionResult {
+        const entity = this.entities.get(entityId);
+        if (!entity) return { ok: false, reason: 'not_found' };
+
+        const commandList = this.getEntityCommandList(entity);
+        commandList.clearAll();
+        this.setEntityCommandList(entity, commandList);
+        this.clearWorkerMining(entity);
+        this.clearWorkerMovement(entity);
+        this.markChunkDirtyAt(entity.x, entity.y);
+        return { ok: true, entity: { ...entity } };
+    }
+
+    private removeQueuedEntityCommand(entityId: string, commandId: string): { ok: true } | { ok: false; reason: 'not_found' | 'invalid_target' } {
+        const entity = this.entities.get(entityId);
+        if (!entity) return { ok: false, reason: 'not_found' };
+
+        const commandList = this.getEntityCommandList(entity);
+        const removed = commandList.removeQueued(commandId);
+        if (!removed) return { ok: false, reason: 'invalid_target' };
+        this.setEntityCommandList(entity, commandList);
+        this.markChunkDirtyAt(entity.x, entity.y);
+        return { ok: true };
+    }
+
+    private asWorkerFailureReason(reason: EntityActionFailureReason): 'not_found' | 'not_worker' | 'invalid_building' | 'already_deployed' | 'already_recalled' | 'no_deploy_space' | 'invalid_target' | 'path_blocked' {
+        if (reason === 'not_movable' || reason === 'not_miner') return 'invalid_target';
+        return reason;
+    }
+
+    private asPlayerFailureReason(reason: EntityActionFailureReason): 'not_found' | 'invalid_target' | 'path_blocked' {
+        if (reason === 'not_movable' || reason === 'not_miner') return 'invalid_target';
+        if (reason === 'not_worker' || reason === 'invalid_building' || reason === 'already_deployed' || reason === 'already_recalled' || reason === 'no_deploy_space') {
+            return 'invalid_target';
+        }
+        return reason;
     }
 
     private isInBaseDropoffZone(base: WorldEntity, x: number, y: number): boolean {

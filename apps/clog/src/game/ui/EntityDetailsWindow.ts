@@ -61,7 +61,7 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
     const frame = createFloatingWindow({
         title: 'Entity Details',
         className: 'entity-details-window',
-        resizable: true,
+        resizable: false,
         initialState: options.initialWindowState,
         onStateChange: (state) => {
             options.onWindowStateChange(state);
@@ -104,7 +104,7 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
         for (const entry of entries) {
             const button = document.createElement('button');
             button.type = 'button';
-            button.className = 'ui95-button';
+            button.className = 'ui95-button entity-details-action-btn';
             button.textContent = entry.label;
             button.disabled = entry.disabled === true;
             button.onclick = entry.onClick;
@@ -130,12 +130,12 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
 
     const interruptCurrentButton = document.createElement('button');
     interruptCurrentButton.type = 'button';
-    interruptCurrentButton.className = 'ui95-button';
+    interruptCurrentButton.className = 'ui95-button entity-details-action-btn';
     interruptCurrentButton.textContent = 'Interrupt Current';
 
     const clearQueueButton = document.createElement('button');
     clearQueueButton.type = 'button';
-    clearQueueButton.className = 'ui95-button';
+    clearQueueButton.className = 'ui95-button entity-details-action-btn';
     clearQueueButton.textContent = 'Clear Queue';
 
     workerCommandButtons.append(interruptCurrentButton, clearQueueButton);
@@ -199,7 +199,7 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
 
             const action = document.createElement('button');
             action.type = 'button';
-            action.className = 'ui95-button entity-worker-action';
+            action.className = 'ui95-button entity-details-action-btn entity-worker-action';
             action.textContent = worker.deployed ? 'Return' : 'Deploy';
             action.onclick = () => {
                 if (worker.deployed) {
@@ -294,7 +294,7 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
 
             const removeButton = document.createElement('button');
             removeButton.type = 'button';
-            removeButton.className = 'ui95-button entity-worker-action';
+            removeButton.className = 'ui95-button entity-details-action-btn entity-worker-action';
             removeButton.textContent = 'Kill';
             removeButton.onclick = () => {
                 options.onRemoveQueuedWorkerCommand(worker.id, queued.id);
@@ -321,10 +321,11 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
             return;
         }
 
+        inventorySection.hidden = false;
+
         const synced = adapter.syncEntityInventory?.(entity, state, binding) ?? false;
         if (synced) {
             adapter.onStateChange(state);
-            return;
         }
 
         const visibleSlots = Math.max(ENTITY_INVENTORY_MIN_VISIBLE_SLOTS, binding.maxSlots);
