@@ -212,7 +212,7 @@ type WorldRules = {
 
 const BASE_ENTITY_ID = 'entity-base';
 const MAIN_PLAYER_ENTITY_ID = 'entity-player-main';
-const BASE_ENTITY_CAPACITY = 8;
+const BASE_ENTITY_CAPACITY = 6;
 const BASE_VISIBILITY_RADIUS = 7;
 const PLAYER_VISIBILITY_RADIUS = 14;
 const PLAYER_MOVE_SPEED_TILES_PER_SECOND = 2.5;

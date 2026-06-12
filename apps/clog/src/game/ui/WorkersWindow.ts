@@ -1,6 +1,7 @@
-import { getEntityLabel } from '../content/entities.ts';
+import { getEntityDefinition, getEntityLabel } from '../content/entities.ts';
 import { WORKER_DEFINITIONS, type WorkerUnitType } from '../content/workers';
 import type { BaseSlotSummary, WorldEntity } from '../world/WorldModel';
+import { getEntityCost } from '../world/entityDefinitions.ts';
 import { createFloatingWindow } from './FloatingWindow';
 
 type WorkersWindowOptions = {
@@ -29,8 +30,8 @@ export function createWorkersWindow(options: WorkersWindowOptions): WorkersWindo
             minimized: false,
             left: 24,
             top: 280,
-            width: 360,
-            height: 340,
+            width: 520,
+            height: 420,
         },
     });
 
@@ -39,17 +40,35 @@ export function createWorkersWindow(options: WorkersWindowOptions): WorkersWindo
 
     const summary = document.createElement('p');
     summary.className = 'workers-window-summary';
+    summary.textContent = 'Slots: unknown';
+
+    const workerSection = document.createElement('section');
+    workerSection.className = 'entity-inventory-section workers-window-section';
+
+    const workerTitle = document.createElement('h5');
+    workerTitle.className = 'entity-workers-title';
+    workerTitle.textContent = 'Workers';
+
+    const workerGrid = document.createElement('div');
+    workerGrid.className = 'inventory-grid workers-window-grid';
+
+    workerSection.append(workerTitle, summary, workerGrid);
+
+    const spawnSection = document.createElement('section');
+    spawnSection.className = 'entity-workers-section workers-window-spawn-section';
+
+    const spawnTitle = document.createElement('h5');
+    spawnTitle.className = 'entity-workers-title';
+    spawnTitle.textContent = 'Spawn Workers';
 
     const spawnActions = document.createElement('div');
     spawnActions.className = 'workers-window-actions';
-
-    const workersGrid = document.createElement('div');
-    workersGrid.className = 'entity-workers-grid';
+    spawnSection.append(spawnTitle, spawnActions);
 
     const footerActions = document.createElement('div');
     footerActions.className = 'workers-window-actions';
 
-    panel.append(summary, spawnActions, workersGrid, footerActions);
+    panel.append(workerSection, spawnSection, footerActions);
     frame.content.appendChild(panel);
 
     let currentBaseId: string | null = null;
@@ -59,54 +78,56 @@ export function createWorkersWindow(options: WorkersWindowOptions): WorkersWindo
 
         const workers = options.getWorkersForBuilding(currentBaseId);
         const slots = options.getBaseSlotSummary(currentBaseId);
+        const capacity = slots?.capacity ?? workers.length;
+        const columns = Math.min(3, Math.max(1, capacity));
+        const rows = Math.max(1, Math.ceil(capacity / columns));
 
         if (slots) {
-            summary.textContent = `Slots: ${slots.used}/${slots.capacity} used (Hero ${slots.heroReserved}, Workers ${slots.workersAssigned})`;
+            summary.textContent = `${slots.used} / ${slots.capacity} occupied`;
         } else {
             summary.textContent = 'Slots: unknown';
         }
 
-        spawnActions.textContent = '';
-        for (const definition of Object.values(WORKER_DEFINITIONS)) {
-            const button = document.createElement('button');
-            button.type = 'button';
-            button.className = 'ui95-button entity-details-action-btn';
-            button.textContent = `Spawn ${definition.name}`;
-            button.disabled = !!slots && slots.available <= 0;
-            button.addEventListener('click', () => {
-                if (!currentBaseId) return;
-                options.onSpawnUnit(currentBaseId, definition.id);
-            });
-            spawnActions.appendChild(button);
-        }
+        workerGrid.textContent = '';
+        workerGrid.style.setProperty('--inventory-columns', String(columns));
+        workerGrid.style.setProperty('--inventory-rows', String(rows));
+        workerGrid.style.setProperty('--inventory-cell-size', '58px');
+        workerGrid.style.setProperty('--inventory-gap', '6px');
 
-        workersGrid.textContent = '';
-        if (workers.length === 0) {
-            const empty = document.createElement('p');
-            empty.className = 'entity-workers-empty';
-            empty.textContent = 'No workers assigned to this station.';
-            workersGrid.appendChild(empty);
-        } else {
-            for (const worker of workers) {
-                const card = document.createElement('article');
-                card.className = 'entity-worker-card';
+        for (let index = 0; index < capacity; index++) {
+            const worker = workers[index] ?? null;
+            const cell = document.createElement('div');
+            cell.className = 'inventory-cell workers-window-cell';
+            cell.dataset.slot = String(index + 1);
+            cell.title = worker
+                ? `${getEntityLabel(worker.kind, worker.unitType)}`
+                : `Empty slot ${index + 1}`;
 
-                const label = document.createElement('div');
-                label.className = 'entity-worker-label';
-                label.textContent = worker.viewDef?.icon
-                    ? `${worker.viewDef.icon} ${getEntityLabel(worker.kind, worker.unitType)}`
-                    : getEntityLabel(worker.kind, worker.unitType);
+            if (worker) {
+                cell.classList.add('is-occupied');
+                if (worker.viewDef?.backdrop) {
+                    cell.style.setProperty('--inventory-item-backdrop', worker.viewDef.backdrop);
+                }
+                if (worker.viewDef?.tint) {
+                    cell.style.setProperty('--inventory-item-tint', worker.viewDef.tint);
+                }
 
-                const status = document.createElement('div');
-                status.className = 'entity-worker-status';
-                status.textContent = worker.deployed
-                    ? `Deployed (${Math.round(worker.x)}, ${Math.round(worker.y)})`
-                    : 'Docked';
+                const icon = document.createElement('span');
+                icon.className = 'inventory-item-cell-icon';
+                icon.textContent = worker.viewDef?.icon ?? 'W';
+
+                const label = document.createElement('span');
+                label.className = 'workers-window-cell-label';
+                label.textContent = getEntityLabel(worker.kind, worker.unitType);
+
+                const status = document.createElement('span');
+                status.className = 'workers-window-cell-status';
+                status.textContent = worker.deployed ? 'Deployed' : 'Docked';
 
                 const action = document.createElement('button');
                 action.type = 'button';
-                action.className = 'ui95-button entity-details-action-btn entity-worker-action';
-                action.textContent = worker.deployed ? 'Return' : 'Deploy';
+                action.className = 'ui95-button workers-window-cell-action';
+                action.textContent = worker.deployed ? 'Recall' : 'Deploy';
                 action.addEventListener('click', () => {
                     if (worker.deployed) {
                         options.onRecallWorker(worker.id);
@@ -115,9 +136,43 @@ export function createWorkersWindow(options: WorkersWindowOptions): WorkersWindo
                     }
                 });
 
-                card.append(label, status, action);
-                workersGrid.appendChild(card);
+                cell.append(icon, label, status, action);
             }
+
+            workerGrid.appendChild(cell);
+        }
+
+        spawnActions.textContent = '';
+        for (const definition of Object.values(WORKER_DEFINITIONS)) {
+            const entityDef = getEntityDefinition('worker', definition.id);
+            const spawnCost = getEntityCost('worker-miner').ore;
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'ui95-button workers-window-spawn-card';
+            button.disabled = !!slots && slots.available <= 0;
+            button.addEventListener('click', () => {
+                if (!currentBaseId) return;
+                options.onSpawnUnit(currentBaseId, definition.id);
+            });
+
+            const icon = document.createElement('span');
+            icon.className = 'workers-window-spawn-icon';
+            icon.textContent = entityDef.viewDef.icon;
+
+            const text = document.createElement('span');
+            text.className = 'workers-window-spawn-text';
+
+            const name = document.createElement('span');
+            name.className = 'workers-window-spawn-name';
+            name.textContent = definition.name;
+
+            const cost = document.createElement('span');
+            cost.className = 'workers-window-spawn-cost';
+            cost.textContent = `Cost: ${spawnCost} ore`;
+
+            text.append(name, cost);
+            button.append(icon, text);
+            spawnActions.appendChild(button);
         }
 
         footerActions.textContent = '';

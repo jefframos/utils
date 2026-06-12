@@ -87,6 +87,7 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
 
     const actions = document.createElement('div');
     actions.className = 'entity-details-actions';
+    actions.hidden = true;
 
     const inventorySection = document.createElement('section');
     inventorySection.className = 'entity-inventory-section';
@@ -530,66 +531,14 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
             meta.hidden = false;
             renderEntityInventory(entity);
 
-            if (entity.kind === 'beacon') {
-                setActions([
-                    {
-                        label: `Delete Beacon (+${BEACON_REFUND_ORE} ore refund)`,
-                        onClick: () => {
-                            options.onDeleteBeacon(entity.id);
-                        },
-                    },
-                ]);
-            } else if (entity.kind === 'player') {
-                setActions([
-                    {
-                        label: 'Build',
-                        onClick: () => {
-                            options.onBuild(entity.id);
-                        },
-                    },
-                ]);
-            } else if (entity.kind === 'worker') {
-                setActions([
-                    {
-                        label: entity.deployed ? 'Return To Base' : 'Deploy Worker',
-                        onClick: () => {
-                            if (entity.deployed) {
-                                options.onRecallWorker(entity.id);
-                            } else {
-                                options.onDeployWorker(entity.id);
-                            }
-                        },
-                    },
-                    {
-                        label: 'Interrupt Current',
-                        onClick: () => {
-                            options.onInterruptWorkerCommand(entity.id);
-                        },
-                    },
-                    {
-                        label: 'Clear Queue',
-                        onClick: () => {
-                            options.onClearWorkerCommands(entity.id);
-                        },
-                    },
-                ]);
-            } else {
-                setActions([]);
-            }
+            actions.hidden = true;
+            setActions([]);
 
-            if (entity.kind === 'base') {
-                baseWorkersSection.hidden = true;
-                workerCommandsSection.hidden = true;
-                workersGrid.textContent = '';
-            } else if (entity.kind === 'worker') {
-                baseWorkersSection.hidden = true;
-                workerCommandsSection.hidden = false;
-                renderWorkerCommandQueue(entity);
-            } else {
-                baseWorkersSection.hidden = true;
-                workerCommandsSection.hidden = true;
-                workersGrid.textContent = '';
-            }
+            baseWorkersSection.hidden = true;
+            workerCommandsSection.hidden = true;
+            workersGrid.textContent = '';
+            workerQueuedCommands.textContent = '';
+            workerCurrentCommand.textContent = '';
 
             const frameState = frame.getState();
             if (!frameState.open) {
@@ -604,6 +553,7 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
             meta.hidden = true;
             inventorySection.hidden = true;
             inventoryGrid.textContent = '';
+            actions.hidden = true;
             setActions([]);
             baseWorkersSection.hidden = true;
             workersGrid.textContent = '';
