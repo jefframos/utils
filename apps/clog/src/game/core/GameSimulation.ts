@@ -6,6 +6,8 @@ import { addInventoryItem, getTotalResourceCount, deductResource } from '../inve
 
 const BEACON_ORE_COST = 10;
 const BEACON_DELETE_REFUND_ORE = Math.floor(BEACON_ORE_COST * 0.5);
+const OUTPOST_ORE_COST = 20;
+const OUTPOST_DELETE_REFUND_ORE = Math.floor(OUTPOST_ORE_COST * 0.5);
 
 export class GameSimulation {
     readonly world: WorldModel;
@@ -168,6 +170,53 @@ export class GameSimulation {
             ];
         }
 
+        if (command.type === 'PlaceOutpost') {
+            if (this.inventory) {
+                const oreCount = getTotalResourceCount(this.inventory, 'debug-asteroid-ore');
+                if (oreCount < OUTPOST_ORE_COST) {
+                    return [
+                        {
+                            type: 'EntityPlacementFailed',
+                            entityType: 'outpost',
+                            x: command.x,
+                            y: command.y,
+                            reason: 'insufficient_ore',
+                        },
+                    ];
+                }
+            }
+
+            const placed = this.world.placeOutpost(command.x, command.y, command.builderEntityId);
+            if (!placed) {
+                const reason = this.world.getOutpostPlacementFailureReason(command.x, command.y, command.builderEntityId);
+                return [
+                    {
+                        type: 'EntityPlacementFailed',
+                        entityType: 'outpost',
+                        x: command.x,
+                        y: command.y,
+                        reason,
+                    },
+                ];
+            }
+
+            if (this.inventory) {
+                deductResource(this.inventory, 'debug-asteroid-ore', OUTPOST_ORE_COST);
+            }
+
+            return [
+                {
+                    type: 'EntityPlaced',
+                    id: placed.id,
+                    entityType: 'outpost',
+                    x: placed.x,
+                    y: placed.y,
+                    parentId: placed.parentId,
+                },
+                { type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() },
+            ];
+        }
+
         if (command.type === 'RemoveBeacon') {
             const removed = this.world.removeBeaconByEntityId(command.entityId);
             if (!removed.ok) {
@@ -262,6 +311,18 @@ export class GameSimulation {
                     buildingId: command.buildingId,
                     count: recalled.count,
                 },
+                { type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() },
+            ];
+        }
+
+        if (command.type === 'ReassignWorker') {
+            const reassigned = this.world.reassignWorker(command.workerId, command.newHomeId);
+            if (!reassigned.ok) {
+                return [{ type: 'WorkerActionFailed', action: 'reassign', id: command.workerId, reason: reassigned.reason }];
+            }
+
+            return [
+                { type: 'WorkerReassigned', workerId: command.workerId, newHomeId: command.newHomeId },
                 { type: 'WorldChunkDirty', keys: this.world.getDirtyChunkKeys() },
             ];
         }

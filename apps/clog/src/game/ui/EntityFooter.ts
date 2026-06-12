@@ -74,6 +74,7 @@ export function createEntityFooter(options: EntityFooterOptions): EntityFooter {
 
     const getEntityLabel = (entity: WorldEntity): string => {
         if (entity.kind === 'base') return 'Space Station';
+        if (entity.kind === 'outpost') return 'Outpost';
         if (entity.kind === 'beacon') return 'Beacon';
         if (entity.kind === 'player') return 'Hero';
         if (entity.kind === 'worker') return entity.unitType === 'basic-worker' ? 'Basic Worker' : 'Worker';
@@ -82,6 +83,7 @@ export function createEntityFooter(options: EntityFooterOptions): EntityFooter {
 
     const getEntityIcon = (entity: WorldEntity): string => {
         if (entity.kind === 'base') return '🏛️';
+        if (entity.kind === 'outpost') return '🏗️';
         if (entity.kind === 'beacon') return '🔴';
         if (entity.kind === 'player') return '👤';
         if (entity.kind === 'worker') return '🔧';
@@ -319,7 +321,7 @@ export function createEntityFooter(options: EntityFooterOptions): EntityFooter {
                 onClick: () => options.onBuild?.(),
                 hidden: !entity.builder?.buildables.length,
             });
-        } else if (entity.kind === 'base') {
+        } else if (entity.kind === 'base' || entity.kind === 'outpost') {
             buttons.push({
                 label: 'Workers',
                 onClick: () => options.onOpenWorkers?.(),

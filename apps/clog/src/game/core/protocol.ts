@@ -24,6 +24,13 @@ export type PlaceBeaconCommand = {
     builderEntityId?: string;
 };
 
+export type PlaceOutpostCommand = {
+    type: 'PlaceOutpost';
+    x: number;
+    y: number;
+    builderEntityId?: string;
+};
+
 export type RemoveBeaconCommand = {
     type: 'RemoveBeacon';
     entityId: string;
@@ -48,6 +55,12 @@ export type RecallWorkerCommand = {
 export type RecallWorkersCommand = {
     type: 'RecallWorkers';
     buildingId: string;
+};
+
+export type ReassignWorkerCommand = {
+    type: 'ReassignWorker';
+    workerId: string;
+    newHomeId: string;
 };
 
 export type MoveWorkerCommand = {
@@ -147,11 +160,13 @@ export type GameCommand =
     | GenerateWorldCommand
     | LoadWorldSnapshotCommand
     | PlaceBeaconCommand
+    | PlaceOutpostCommand
     | RemoveBeaconCommand
     | SpawnUnitCommand
     | DeployWorkerCommand
     | RecallWorkerCommand
     | RecallWorkersCommand
+    | ReassignWorkerCommand
     | MoveWorkerCommand
     | MovePlayerCommand
     | MineWorkerCommand
@@ -205,7 +220,7 @@ export type WorldGeneratedEvent = {
 export type EntityPlacedEvent = {
     type: 'EntityPlaced';
     id: string;
-    entityType: 'beacon';
+    entityType: 'beacon' | 'outpost';
     x: number;
     y: number;
     parentId: string | null;
@@ -213,16 +228,16 @@ export type EntityPlacedEvent = {
 
 export type EntityPlacementFailedEvent = {
     type: 'EntityPlacementFailed';
-    entityType: 'beacon';
+    entityType: 'beacon' | 'outpost';
     x: number;
     y: number;
-    reason: 'too_far' | 'not_open' | 'already_exists' | 'unknown_tile' | 'insufficient_ore' | 'not_builder';
+    reason: 'too_far' | 'not_open' | 'already_exists' | 'occupied' | 'unknown_tile' | 'insufficient_ore' | 'not_builder';
 };
 
 export type EntityRemovedEvent = {
     type: 'EntityRemoved';
     id: string;
-    entityType: 'beacon';
+    entityType: 'beacon' | 'outpost';
     x: number;
     y: number;
     refundOre: number;
@@ -231,8 +246,8 @@ export type EntityRemovedEvent = {
 export type EntityRemovalFailedEvent = {
     type: 'EntityRemovalFailed';
     id: string;
-    entityType: 'beacon';
-    reason: 'not_found' | 'not_beacon';
+    entityType: 'beacon' | 'outpost';
+    reason: 'not_found' | 'not_beacon' | 'not_outpost';
 };
 
 export type WorkerSpawnedEvent = {
@@ -309,9 +324,15 @@ export type WorkersRecalledEvent = {
     count: number;
 };
 
+export type WorkerReassignedEvent = {
+    type: 'WorkerReassigned';
+    workerId: string;
+    newHomeId: string;
+};
+
 export type WorkerActionFailedEvent = {
     type: 'WorkerActionFailed';
-    action: 'spawn' | 'deploy' | 'recall' | 'recall_all' | 'move' | 'mine' | 'interrupt' | 'clear_commands' | 'remove_queued' | 'pause' | 'resume';
+    action: 'spawn' | 'deploy' | 'recall' | 'recall_all' | 'reassign' | 'move' | 'mine' | 'interrupt' | 'clear_commands' | 'remove_queued' | 'pause' | 'resume';
     id: string;
     reason: 'not_found' | 'not_worker' | 'invalid_building' | 'already_deployed' | 'already_recalled' | 'no_deploy_space' | 'invalid_target' | 'path_blocked' | 'capacity_reached';
 };
@@ -337,6 +358,7 @@ export type GameEvent =
     | WorkerQueuedCommandRemovedEvent
     | PlayerQueuedCommandRemovedEvent
     | WorkersRecalledEvent
+    | WorkerReassignedEvent
     | WorkerActionFailedEvent
     | WorkerCommandsPausedEvent
     | WorkerCommandsResumedEvent

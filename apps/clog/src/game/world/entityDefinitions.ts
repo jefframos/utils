@@ -4,9 +4,9 @@
  * This decouples entity data from behavior logic and makes capabilities explicit.
  */
 
-export type EntityDefinitionId = 'base' | 'player' | 'worker-miner' | 'beacon';
+export type EntityDefinitionId = 'base' | 'outpost' | 'player' | 'worker-miner' | 'beacon';
 
-export type BuildCapability = 'beacon' | 'worker-miner';
+export type BuildCapability = 'beacon' | 'outpost' | 'worker-miner';
 
 export interface BuilderDefinition {
     buildable: BuildCapability[];
@@ -54,6 +54,21 @@ export const ENTITY_DEFINITIONS: Record<EntityDefinitionId, EntityDefinition> = 
         },
     },
 
+    'outpost': {
+        id: 'outpost',
+        displayName: 'Outpost',
+        cost: { ore: 20 },
+        mobility: 'static',
+        baseVisibilityRadius: 5,
+        components: {
+            life: { maxHp: 150 },
+            spawner: {
+                spawnable: ['worker-miner'],
+                spawnLimit: { 'worker-miner': 4 },
+            },
+        },
+    },
+
     'player': {
         id: 'player',
         displayName: 'Hero',
@@ -66,7 +81,7 @@ export const ENTITY_DEFINITIONS: Record<EntityDefinitionId, EntityDefinition> = 
             inventory: { capacity: 12 },
             life: { maxHp: 100 },
             builder: {
-                buildable: ['beacon'],
+                buildable: ['beacon', 'outpost'],
             },
         },
     },

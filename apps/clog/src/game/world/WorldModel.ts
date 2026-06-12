@@ -26,7 +26,7 @@ export type SavedTile = {
     visibility: VisibilityState;
 };
 
-export type WorldEntityKind = 'base' | 'beacon' | 'worker' | 'player';
+export type WorldEntityKind = 'base' | 'outpost' | 'beacon' | 'worker' | 'player';
 export type WorldEntityMobility = 'static' | 'dynamic';
 export type { WorkerUnitType } from '../content/workers';
 
@@ -38,7 +38,7 @@ export type EntityWalkingDefinition = {
 
 export type EntityBuilderDefinition = {
     buildRadius: number;
-    buildables: Array<'beacon'>;
+    buildables: Array<'beacon' | 'outpost'>;
 };
 
 export type EntityMiningDefinition = {
@@ -99,7 +99,7 @@ export type WorkerMovementState = {
     path: Array<{ x: number; y: number }>;
     stepIndex: number;
     progress: number;
-    mode: 'move' | 'return';
+    mode: 'move' | 'return' | 'reassign';
     homeId?: string | null;
 };
 
@@ -213,6 +213,7 @@ type WorldRules = {
 const BASE_ENTITY_ID = 'entity-base';
 const MAIN_PLAYER_ENTITY_ID = 'entity-player-main';
 const BASE_ENTITY_CAPACITY = 6;
+const OUTPOST_ENTITY_CAPACITY = 4;
 const BASE_VISIBILITY_RADIUS = 7;
 const PLAYER_VISIBILITY_RADIUS = 14;
 const PLAYER_MOVE_SPEED_TILES_PER_SECOND = 2.5;
@@ -304,6 +305,7 @@ export class WorldModel {
     private baseXValue = BASE_START_X;
     private baseYValue = BASE_START_Y;
     private nextBeaconIndex = 1;
+    private nextOutpostIndex = 1;
     private nextWorkerIndex = 1;
 
     get width(): number {
@@ -352,6 +354,7 @@ export class WorldModel {
         this.pendingPlayerOreCollected.length = 0;
         this.pendingPlayerDropoffArrivals.length = 0;
         this.nextBeaconIndex = 1;
+        this.nextOutpostIndex = 1;
         this.nextWorkerIndex = 1;
         this.widthValue = WORLD_WIDTH;
         this.heightValue = WORLD_HEIGHT;
@@ -385,8 +388,14 @@ export class WorldModel {
         let baseMatch: WorldEntity | null = null;
         for (const entity of this.entities.values()) {
             if (entity.kind === 'worker' && entity.deployed !== true) continue;
-            if (entity.kind === 'base') {
-                if (Math.abs(entity.x - x) <= 2 && Math.abs(entity.y - y) <= 2) baseMatch = entity;
+            if (entity.kind === 'base' || entity.kind === 'outpost') {
+                const sizeX = entity.sizeDef?.tilesX ?? 3;
+                const sizeY = entity.sizeDef?.tilesY ?? 3;
+                const ex = Math.round(entity.x);
+                const ey = Math.round(entity.y);
+                if (x >= ex && x < ex + sizeX && y >= ey && y < ey + sizeY) {
+                    baseMatch = entity;
+                }
                 continue;
             }
             const sizeX = entity.sizeDef?.tilesX ?? 1;
@@ -406,15 +415,17 @@ export class WorldModel {
 
     getBaseSlotSummary(buildingId: string): BaseSlotSummary | null {
         const building = this.entities.get(buildingId);
-        if (!building || building.kind !== 'base') return null;
+        if (!building || (building.kind !== 'base' && building.kind !== 'outpost')) return null;
+
+        const capacity = building.kind === 'outpost' ? OUTPOST_ENTITY_CAPACITY : BASE_ENTITY_CAPACITY;
 
         const workersAssigned = this.getWorkersForBuilding(buildingId).length;
         const heroReserved = this.getMainPlayerEntity() ? 1 : 0;
         const used = workersAssigned + heroReserved;
-        const available = Math.max(0, BASE_ENTITY_CAPACITY - used);
+        const available = Math.max(0, capacity - used);
 
         return {
-            capacity: BASE_ENTITY_CAPACITY,
+            capacity,
             used,
             available,
             heroReserved,
@@ -493,10 +504,22 @@ export class WorldModel {
         } else if (snapshot.version === 3 && Array.isArray(snapshot.entities)) {
             for (const entity of snapshot.entities) {
                 const normalizedEntity: WorldEntity = { ...entity };
+                if (normalizedEntity.kind === 'base' && normalizedEntity.id.startsWith('entity-outpost-')) {
+                    normalizedEntity.kind = 'outpost';
+                }
                 if (normalizedEntity.kind === 'beacon') {
                     normalizedEntity.visibilityRadius = BEACON_VISIBILITY_RADIUS;
                     normalizedEntity.sizeDef = getEntityDefinition('beacon').sizeDef;
                     normalizedEntity.viewDef = getEntityDefinition('beacon').viewDef;
+                } else if (normalizedEntity.kind === 'outpost') {
+                    normalizedEntity.visibilityRadius = 5;
+                    normalizedEntity.mobility = 'static';
+                    normalizedEntity.parentId = normalizedEntity.parentId ?? null;
+                    normalizedEntity.inventoryDef = normalizedEntity.inventoryDef ?? {
+                        capacity: 20,
+                    };
+                    normalizedEntity.sizeDef = getEntityDefinition('outpost').sizeDef;
+                    normalizedEntity.viewDef = getEntityDefinition('outpost').viewDef;
                 } else if (normalizedEntity.kind === 'player') {
                     normalizedEntity.visibilityRadius = PLAYER_VISIBILITY_RADIUS;
                     normalizedEntity.mobility = 'dynamic';
@@ -507,8 +530,11 @@ export class WorldModel {
                     };
                     normalizedEntity.builder = normalizedEntity.builder ?? {
                         buildRadius: PLAYER_BUILD_RADIUS,
-                        buildables: ['beacon'],
+                        buildables: ['beacon', 'outpost'],
                     };
+                    if (normalizedEntity.builder && !normalizedEntity.builder.buildables.includes('outpost')) {
+                        normalizedEntity.builder.buildables = [...normalizedEntity.builder.buildables, 'outpost'];
+                    }
                     normalizedEntity.inventoryDef = {
                         capacity: 12,
                         sharedId: 'main-player',
@@ -652,7 +678,7 @@ export class WorldModel {
     /**
      * Get all valid buildable tiles for a builder entity (within build radius and visible).
      */
-    getBuildableTilesForEntity(entityId: string, buildableType: 'beacon'): Array<{ x: number; y: number }> {
+    getBuildableTilesForEntity(entityId: string, buildableType: 'beacon' | 'outpost'): Array<{ x: number; y: number }> {
         const builder = this.entities.get(entityId);
         if (!builder || !builder.builder) return [];
 
@@ -670,6 +696,28 @@ export class WorldModel {
                 if (!tile) continue;
                 if (tile.visibility === 'Unknown') continue;
                 if (buildableType === 'beacon' && this.beacons.some((entry) => entry.x === x && entry.y === y)) continue;
+                if (buildableType === 'outpost') {
+                    const anchorEntity = this.getEntityAtTile(x, y);
+                    if (anchorEntity && (anchorEntity.kind === 'base' || anchorEntity.kind === 'outpost')) continue;
+
+                    let outpostBlocked = false;
+                    for (let ox = 0; ox < 2; ox++) {
+                        for (let oy = 0; oy < 2; oy++) {
+                            const tx = x + ox;
+                            const ty = y + oy;
+                            const checkTile = this.getTile(tx, ty);
+                            const occupied = this.getEntityAtTile(tx, ty);
+                            const blockedByStaticStructure = !!occupied
+                                && (occupied.kind === 'base' || occupied.kind === 'outpost');
+                            if (!checkTile || checkTile.visibility === 'Unknown' || checkTile.solid || blockedByStaticStructure) {
+                                outpostBlocked = true;
+                                break;
+                            }
+                        }
+                        if (outpostBlocked) break;
+                    }
+                    if (outpostBlocked) continue;
+                }
 
                 tiles.push({ x, y });
             }
@@ -766,6 +814,86 @@ export class WorldModel {
         return { ok: true, beacon: { ...removedBeacon } };
     }
 
+    getOutpostPlacementFailureReason(x: number, y: number, builderEntityId?: string): 'too_far' | 'not_open' | 'occupied' | 'unknown_tile' | 'not_builder' {
+        const tile = this.getTile(x, y);
+        if (!tile) return 'unknown_tile';
+        if (tile.visibility === 'Unknown') return 'not_open';
+
+        // Check if there's already an entity at this location (outposts are 2x2)
+        for (let dx = 0; dx < 2; dx++) {
+            for (let dy = 0; dy < 2; dy++) {
+                const checkX = x + dx;
+                const checkY = y + dy;
+                if (this.getEntityAtTile(checkX, checkY)) return 'occupied';
+                const checkTile = this.getTile(checkX, checkY);
+                if (!checkTile || checkTile.solid) return 'occupied';
+            }
+        }
+
+        const builder = this.resolveBuilderEntity(builderEntityId);
+        if (!builder || !builder.builder || !builder.builder.buildables.includes('outpost')) {
+            return 'not_builder';
+        }
+
+        const distance = Math.hypot(x - builder.x, y - builder.y);
+        if (distance > builder.builder.buildRadius) return 'too_far';
+
+        return 'unknown_tile';
+    }
+
+    placeOutpost(x: number, y: number, builderEntityId?: string): WorldEntity | null {
+        this.ensureWorldContainsTile(x, y);
+        const tile = this.getTile(x, y);
+        if (!tile) return null;
+        if (tile.visibility === 'Unknown') return null;
+
+        // Check if there's already an entity at this location (outposts are 2x2)
+        for (let dx = 0; dx < 2; dx++) {
+            for (let dy = 0; dy < 2; dy++) {
+                const checkX = x + dx;
+                const checkY = y + dy;
+                if (this.getEntityAtTile(checkX, checkY)) return null;
+                const checkTile = this.getTile(checkX, checkY);
+                if (!checkTile || checkTile.solid) return null;
+            }
+        }
+
+        const builder = this.resolveBuilderEntity(builderEntityId);
+        if (!builder || !builder.builder || !builder.builder.buildables.includes('outpost')) return null;
+
+        const buildDistance = Math.hypot(x - builder.x, y - builder.y);
+        if (buildDistance > builder.builder.buildRadius) return null;
+
+        const outpostId = `outpost-${this.nextOutpostIndex++}`;
+        const outpostEntityId = `entity-${outpostId}`;
+        const outpost: WorldEntity = {
+            id: outpostEntityId,
+            kind: 'outpost',
+            mobility: 'static',
+            x,
+            y,
+            visibilityRadius: 5,
+            parentId: null,
+            inventoryDef: {
+                capacity: 20,
+            },
+            sizeDef: getEntityDefinition('outpost').sizeDef,
+            viewDef: getEntityDefinition('outpost').viewDef,
+        };
+
+        this.entities.set(outpostEntityId, outpost);
+        this.applyEntityVisibility();
+        this.markModifiedAt(x, y);
+        this.markModifiedAt(x + 1, y);
+        this.markModifiedAt(x, y + 1);
+        this.markModifiedAt(x + 1, y + 1);
+        this.markChunkDirtyAt(x, y);
+        this.markChunkDirtyAt(x + 1, y);
+        this.markChunkDirtyAt(x, y + 1);
+        this.markChunkDirtyAt(x + 1, y + 1);
+        return { ...outpost };
+    }
+
     spawnUnitAtBuilding(buildingId: string, unitType: WorkerUnitType): WorkerActionResult {
         return this.spawnWorkerOfTypeAtBuilding(buildingId, unitType);
     }
@@ -775,7 +903,7 @@ export class WorldModel {
         if (!building) {
             return { ok: false, reason: 'not_found' };
         }
-        if (building.kind !== 'base') {
+        if (building.kind !== 'base' && building.kind !== 'outpost') {
             return { ok: false, reason: 'invalid_building' };
         }
 
@@ -856,6 +984,8 @@ export class WorldModel {
         worker.parentId = null;
         worker.movement = null;
         worker.mining = null;
+        // Clear any leftover commands from previous deployment (e.g., recall commands)
+        worker.commandList = undefined;
         this.markChunkDirtyAt(previousX, previousY);
         this.markChunkDirtyAt(tile.x, tile.y);
         this.applyWorkerVisibility(worker);
@@ -871,7 +1001,7 @@ export class WorldModel {
         if (!building) {
             return { ok: false, reason: 'not_found' };
         }
-        if (building.kind !== 'base') {
+        if (building.kind !== 'base' && building.kind !== 'outpost') {
             return { ok: false, reason: 'invalid_building' };
         }
 
@@ -915,6 +1045,71 @@ export class WorldModel {
         }
         return { ok: true, count };
     }
+
+    reassignWorker(workerId: string, newHomeId: string): WorkerActionResult {
+        const worker = this.entities.get(workerId);
+        if (!worker) {
+            return { ok: false, reason: 'not_found' };
+        }
+        if (worker.kind !== 'worker') {
+            return { ok: false, reason: 'not_worker' };
+        }
+
+        const newHome = this.entities.get(newHomeId);
+        if (!newHome) {
+            return { ok: false, reason: 'invalid_building' };
+        }
+        if (newHome.kind !== 'base' && newHome.kind !== 'outpost') {
+            return { ok: false, reason: 'invalid_building' };
+        }
+
+        const oldHome = worker.homeId ? this.entities.get(worker.homeId) : null;
+
+        // If the worker is deployed, have it walk to the new home
+        if (worker.deployed) {
+            // Clear any current commands and mining
+            this.clearWorkerCommands(worker.id);
+            this.clearWorkerMining(worker);
+
+            // Find path to the new home (get near the new home, not into it)
+            const approachTile = this.findNearestDropoffTile(newHome, worker.x, worker.y, worker.sizeDef, worker.id);
+            if (!approachTile) {
+                return { ok: false, reason: 'invalid_target' };
+            }
+
+            // Try to find a path to the new home
+            const path = this.findOpenPath(worker.x, worker.y, approachTile.x, approachTile.y, 15000, worker.sizeDef);
+            if (!path || path.length <= 1) {
+                return { ok: false, reason: 'path_blocked' };
+            }
+
+            // Set up movement to walk to new home
+            worker.movement = {
+                path,
+                stepIndex: 1,
+                progress: 0,
+                mode: 'reassign',
+                homeId: newHomeId,
+            };
+            worker.homeId = newHomeId;
+            this.markChunkDirtyAt(worker.x, worker.y);
+            this.markChunkDirtyAt(newHome.x, newHome.y);
+            if (oldHome) {
+                this.markChunkDirtyAt(oldHome.x, oldHome.y);
+            }
+            return { ok: true, worker: { ...worker } };
+        }
+
+        // If worker not deployed, just update the homeId
+        worker.homeId = newHomeId;
+        worker.parentId = newHomeId;
+        this.markChunkDirtyAt(newHome.x, newHome.y);
+        if (oldHome) {
+            this.markChunkDirtyAt(oldHome.x, oldHome.y);
+        }
+        return { ok: true, worker: { ...worker } };
+    }
+
 
     canWorkerMineTile(workerId: string, x: number, y: number): boolean {
         const worker = this.entities.get(workerId);
@@ -1268,7 +1463,30 @@ export class WorldModel {
                     const homeId = entity.movement.homeId ?? entity.homeId ?? null;
                     entity.movement = null;
 
-                    if (movementMode === 'return' && homeId) {
+                    if (movementMode === 'reassign' && homeId) {
+                        // Worker has walked to new home, now deploy it there
+                        const home = this.entities.get(homeId);
+                        if (home) {
+                            const deployTile = this.findDeploymentTile(home, entity.sizeDef, entity.id);
+                            if (deployTile) {
+                                entity.x = deployTile.x;
+                                entity.y = deployTile.y;
+                                entity.deployed = true;
+                                entity.parentId = null;
+                                this.clearWorkerCommands(entity.id);
+                                this.clearWorkerMining(entity);
+                                this.markChunkDirtyAt(deployTile.x, deployTile.y);
+                                this.markChunkDirtyAt(home.x, home.y);
+                                this.applyWorkerVisibility(entity);
+                            } else {
+                                // No deploy space found, just place near home
+                                entity.deployed = false;
+                                entity.parentId = homeId;
+                                this.markChunkDirtyAt(entity.x, entity.y);
+                                this.markChunkDirtyAt(home.x, home.y);
+                            }
+                        }
+                    } else if (movementMode === 'return' && homeId) {
                         const home = this.entities.get(homeId);
                         if (home) {
                             if (entity.mining?.carriedOre && entity.mining.carriedOre > 0) {
@@ -2715,7 +2933,7 @@ export class WorldModel {
         let nearestDistance = Number.POSITIVE_INFINITY;
         for (const entity of this.entities.values()) {
             if (entity.mobility !== 'static') continue;
-            if (entity.kind !== 'base' && entity.kind !== 'beacon') continue;
+            if (entity.kind !== 'base' && entity.kind !== 'outpost' && entity.kind !== 'beacon') continue;
             const distance = Math.hypot(entity.x - fromX, entity.y - fromY);
             if (distance < nearestDistance) {
                 nearestDistance = distance;
@@ -2742,8 +2960,11 @@ export class WorldModel {
             };
             existing.builder = existing.builder ?? {
                 buildRadius: PLAYER_BUILD_RADIUS,
-                buildables: ['beacon'],
+                buildables: ['beacon', 'outpost'],
             };
+            if (existing.builder && !existing.builder.buildables.includes('outpost')) {
+                existing.builder.buildables = [...existing.builder.buildables, 'outpost'];
+            }
             existing.inventoryDef = {
                 capacity: 12,
                 sharedId: 'main-player',
@@ -2784,7 +3005,7 @@ export class WorldModel {
             },
             builder: {
                 buildRadius: PLAYER_BUILD_RADIUS,
-                buildables: ['beacon'],
+                buildables: ['beacon', 'outpost'],
             },
             inventoryDef: {
                 capacity: 12,
@@ -2983,8 +3204,10 @@ export class WorldModel {
     }
 
     private findDeploymentTile(building: WorldEntity, sizeDef?: EntitySizeDef, ignoreEntityId?: string): { x: number; y: number } | null {
-        const minRadius = building.kind === 'base' ? 3 : 2;
+        const minRadius = 1;
         const maxRadius = 14;
+        const buildingSizeX = Math.max(1, building.sizeDef?.tilesX ?? (building.kind === 'base' ? 3 : 2));
+        const buildingSizeY = Math.max(1, building.sizeDef?.tilesY ?? (building.kind === 'base' ? 3 : 2));
 
         for (let radius = minRadius; radius <= maxRadius; radius++) {
             for (let oy = -radius; oy <= radius; oy++) {
@@ -2992,7 +3215,7 @@ export class WorldModel {
                     if (Math.max(Math.abs(ox), Math.abs(oy)) !== radius) continue;
                     const tx = building.x + ox;
                     const ty = building.y + oy;
-                    if (building.kind === 'base' && Math.abs(tx - building.x) <= 2 && Math.abs(ty - building.y) <= 2) continue;
+                    if (tx >= building.x && tx < building.x + buildingSizeX && ty >= building.y && ty < building.y + buildingSizeY) continue;
                     if (!this.isFootprintClearAt(tx, ty, sizeDef, ignoreEntityId)) continue;
                     return { x: tx, y: ty };
                 }
@@ -3328,11 +3551,38 @@ export class WorldModel {
         }
 
         const commandList = this.getEntityCommandList(entity);
-        if (mode === 'replace') {
+        const currentState = commandList.snapshot();
+        const currentCmd = currentState.current;
+
+        // Check if the new command is the same as the current command
+        const isSameCommand = currentCmd &&
+            currentCmd.type === command.type &&
+            currentCmd.payload.x === command.x &&
+            currentCmd.payload.y === command.y &&
+            currentCmd.payload.repeat === command.repeat;
+
+        if (isSameCommand) {
+            // Same command: replace it by clearing the queue and re-enqueueing
             commandList.interruptCurrent();
             commandList.clearAll();
             this.clearWorkerMining(entity);
             this.clearWorkerMovement(entity);
+        } else {
+            // Different command: stop current and add new as current
+            if (mode === 'replace') {
+                commandList.interruptCurrent();
+                commandList.clearAll();
+                this.clearWorkerMining(entity);
+                this.clearWorkerMovement(entity);
+            } else {
+                // For 'append' mode with a different command, interrupt current if there is one
+                if (currentCmd) {
+                    commandList.interruptCurrent();
+                    commandList.clearAll();
+                    this.clearWorkerMining(entity);
+                    this.clearWorkerMovement(entity);
+                }
+            }
         }
 
         commandList.enqueue(command.type, { x: command.x, y: command.y, repeat: command.repeat }, 'append');
@@ -3401,12 +3651,13 @@ export class WorldModel {
     }
 
     private isInBaseDropoffZone(base: WorldEntity, x: number, y: number, sizeDef?: EntitySizeDef): boolean {
-        if (base.kind !== 'base') return false;
+        if (base.kind !== 'base' && base.kind !== 'outpost') return false;
+        const reach = base.kind === 'base' ? 3 : 2;
         const sizeX = Math.max(1, sizeDef?.tilesX ?? 1);
         const sizeY = Math.max(1, sizeDef?.tilesY ?? 1);
         for (let dy = 0; dy < sizeY; dy++) {
             for (let dx = 0; dx < sizeX; dx++) {
-                if (Math.abs(x + dx - base.x) <= 3 && Math.abs(y + dy - base.y) <= 3) {
+                if (Math.abs(x + dx - base.x) <= reach && Math.abs(y + dy - base.y) <= reach) {
                     return true;
                 }
             }

@@ -223,7 +223,7 @@ export class GameScene {
             },
             onOpenWorkers: () => {
                 const entity = this.selectedEntityId ? this.world.getEntityById(this.selectedEntityId) : null;
-                if (!entity || entity.kind !== 'base') return;
+                if (!entity || (entity.kind !== 'base' && entity.kind !== 'outpost')) return;
                 this.workersWindow.openForBase(entity);
             },
             onDeploy: () => {
@@ -582,7 +582,11 @@ export class GameScene {
                     const tx = Math.floor(worldPos.x / TILE_SIZE);
                     const ty = Math.floor(worldPos.y / TILE_SIZE);
                     if (this.buildMode.selectedBuildableType === 'beacon') {
+                        console.debug('[build] place beacon', { x: tx, y: ty, builderEntityId: this.buildMode.builderEntityId });
                         this.transport.send({ type: 'PlaceBeacon', x: tx, y: ty, builderEntityId: this.buildMode.builderEntityId });
+                    } else if (this.buildMode.selectedBuildableType === 'outpost') {
+                        console.debug('[build] place outpost', { x: tx, y: ty, builderEntityId: this.buildMode.builderEntityId });
+                        this.transport.send({ type: 'PlaceOutpost', x: tx, y: ty, builderEntityId: this.buildMode.builderEntityId });
                     }
                 }
                 return;
@@ -868,6 +872,29 @@ export class GameScene {
             });
         }
 
+        // ---------- right-clicked on a base ----------
+        if (clickedEntity?.kind === 'base' || clickedEntity?.kind === 'outpost') {
+            // Recall all workers option
+            items.push({
+                id: 'base-recall-all-workers',
+                label: 'Recall All Workers',
+                onSelect: () => {
+                    this.transport.send({ type: 'RecallWorkers', buildingId: clickedEntity.id });
+                },
+            });
+
+            // Reassign selected worker to this base
+            if (selectedEntity?.kind === 'worker' && selectedEntity.homeId !== clickedEntity.id) {
+                items.push({
+                    id: 'base-reassign-worker',
+                    label: `Reassign ${getEntityLabel(selectedEntity.kind, selectedEntity.unitType)} to this base`,
+                    onSelect: () => {
+                        this.transport.send({ type: 'ReassignWorker', workerId: selectedEntity.id, newHomeId: clickedEntity.id });
+                    },
+                });
+            }
+        }
+
         if (items.length === 0) {
             return;
         }
@@ -935,14 +962,14 @@ export class GameScene {
     private isEntityInDepositRange(entity: WorldEntity, storage: WorldEntity): boolean {
         const dx = Math.abs(entity.x - storage.x);
         const dy = Math.abs(entity.y - storage.y);
-        if (storage.kind === 'base') {
-            return dx <= 3 && dy <= 3;
+        if (storage.kind === 'base' || storage.kind === 'outpost') {
+            return dx <= 2 && dy <= 2;
         }
         return Math.max(dx, dy) <= 1;
     }
 
     private findDepositApproachTile(entity: WorldEntity, storage: WorldEntity): { x: number; y: number } | null {
-        const reach = storage.kind === 'base' ? 3 : 1;
+        const reach = storage.kind === 'base' || storage.kind === 'outpost' ? 2 : 1;
         let best: { x: number; y: number; score: number } | null = null;
 
         for (let oy = -reach; oy <= reach; oy++) {
@@ -1317,28 +1344,76 @@ export class GameScene {
         const builder = this.world.getEntityById(this.buildMode.builderEntityId);
         if (!builder || !builder.builder) return;
 
-        // Get all buildable tiles for the entity (currently only beacon type is supported)
-        const buildableTiles = this.world.getBuildableTilesForEntity(this.buildMode.builderEntityId, 'beacon');
+        const gridInset = 4;
+        const builderX = Math.round(builder.x);
+        const builderY = Math.round(builder.y);
+        const buildRadius = builder.builder.buildRadius;
 
-        // Draw range highlighting
-        for (const tile of buildableTiles) {
-            const px = tile.x * TILE_SIZE;
-            const py = tile.y * TILE_SIZE;
-            this.buildModeOverlay.rect(px, py, TILE_SIZE, TILE_SIZE).fill({ color: 0x6366f1, alpha: 0.15 });
-            this.buildModeOverlay.rect(px, py, TILE_SIZE, TILE_SIZE).stroke({ color: 0x6366f1, width: 1, alpha: 0.3 });
+        // Build-reference grid: hide only where world tiles are blocked or base/outpost footprints occupy the tile.
+        for (let dx = -buildRadius; dx <= buildRadius; dx++) {
+            for (let dy = -buildRadius; dy <= buildRadius; dy++) {
+                if (Math.hypot(dx, dy) > buildRadius) continue;
+
+                const tileX = builderX + dx;
+                const tileY = builderY + dy;
+                const tile = this.world.getTile(tileX, tileY);
+                if (!tile) continue;
+                if (tile.visibility === 'Unknown' || tile.solid) continue;
+
+                const occupied = this.world.getEntityAtTile(tileX, tileY);
+                if (occupied && (occupied.kind === 'base' || occupied.kind === 'outpost')) continue;
+
+                const px = tileX * TILE_SIZE + gridInset;
+                const py = tileY * TILE_SIZE + gridInset;
+                const size = TILE_SIZE - gridInset * 2;
+                this.buildModeOverlay.rect(px, py, size, size).fill({ color: 0x6366f1, alpha: 0.12 });
+                this.buildModeOverlay.rect(px, py, size, size).stroke({ color: 0x6366f1, width: 1, alpha: 0.22 });
+            }
         }
 
         // Draw entity preview at mouse position (only if a buildable type is selected)
         if (this.buildMode.selectedBuildableType) {
-            const previewX = this.buildMode.previewX * TILE_SIZE;
-            const previewY = this.buildMode.previewY * TILE_SIZE;
-            const failureReason = this.world.getBeaconPlacementFailureReason(this.buildMode.previewX, this.buildMode.previewY, this.buildMode.builderEntityId);
+            const previewTileX = this.buildMode.previewX;
+            const previewTileY = this.buildMode.previewY;
+            const failureReason = this.buildMode.selectedBuildableType === 'outpost'
+                ? this.world.getOutpostPlacementFailureReason(previewTileX, previewTileY, this.buildMode.builderEntityId)
+                : this.world.getBeaconPlacementFailureReason(previewTileX, previewTileY, this.buildMode.builderEntityId);
             const isValid = failureReason === 'unknown_tile';
-            const previewColor = isValid ? 0x10b981 : 0xef4444;
-            const previewAlpha = isValid ? 0.4 : 0.3;
+            const previewTilesX = this.buildMode.selectedBuildableType === 'outpost' ? 2 : 1;
+            const previewTilesY = this.buildMode.selectedBuildableType === 'outpost' ? 2 : 1;
+            const inset = 2;
 
-            this.buildModeOverlay.rect(previewX, previewY, TILE_SIZE, TILE_SIZE).fill({ color: previewColor, alpha: previewAlpha });
-            this.buildModeOverlay.rect(previewX, previewY, TILE_SIZE, TILE_SIZE).stroke({ color: previewColor, width: 2, alpha: 0.7 });
+            // Draw gapped per-cell preview. Invalid overlap cells are red;
+            // valid cells stay green unless globally invalid (range/builder), where all become red.
+            for (let dx = 0; dx < previewTilesX; dx++) {
+                for (let dy = 0; dy < previewTilesY; dy++) {
+                    const tileX = previewTileX + dx;
+                    const tileY = previewTileY + dy;
+                    const tile = this.world.getTile(tileX, tileY);
+                    const occupied = !!this.world.getEntityAtTile(tileX, tileY);
+                    const cellBlocked = !tile || tile.visibility === 'Unknown' || tile.solid || occupied;
+
+                    const globallyInvalid = !isValid && failureReason !== 'occupied' && failureReason !== 'not_open';
+                    const drawBlocked = cellBlocked || globallyInvalid;
+                    const color = drawBlocked ? 0xef4444 : 0x10b981;
+                    const alpha = drawBlocked ? 0.35 : 0.35;
+
+                    const px = tileX * TILE_SIZE + inset;
+                    const py = tileY * TILE_SIZE + inset;
+                    const size = TILE_SIZE - inset * 2;
+
+                    this.buildModeOverlay.rect(px, py, size, size).fill({ color, alpha });
+                    this.buildModeOverlay.rect(px, py, size, size).stroke({ color, width: 1.5, alpha: 0.8 });
+                }
+            }
+
+            // Outer border for footprint readability.
+            const borderColor = isValid ? 0x10b981 : 0xef4444;
+            const previewX = previewTileX * TILE_SIZE + 1;
+            const previewY = previewTileY * TILE_SIZE + 1;
+            const previewWidth = previewTilesX * TILE_SIZE - 2;
+            const previewHeight = previewTilesY * TILE_SIZE - 2;
+            this.buildModeOverlay.rect(previewX, previewY, previewWidth, previewHeight).stroke({ color: borderColor, width: 2, alpha: 0.9 });
         }
     }
 }

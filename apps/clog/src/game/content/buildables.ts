@@ -1,4 +1,4 @@
-export type BuildableEntityType = 'beacon';
+export type BuildableEntityType = 'beacon' | 'outpost';
 
 export type BuildableEntityDef = {
     id: BuildableEntityType;
@@ -16,18 +16,29 @@ export const BUILDABLE_ENTITIES: Record<BuildableEntityType, BuildableEntityDef>
         cost: 10,
         icon: '🔴',
     },
+    outpost: {
+        id: 'outpost',
+        name: 'Outpost',
+        description: 'A remote operations hub. Smaller than your main base, can spawn and host up to 4 workers.',
+        cost: 20,
+        icon: '🏗️',
+    },
 };
 
 export function getBuildableCategory(entityType: BuildableEntityType): string {
     if (entityType === 'beacon') return 'Structures';
+    if (entityType === 'outpost') return 'Bases';
     return 'Other';
 }
 
-export const BUILDABLE_CATEGORIES = ['Structures'];
+export const BUILDABLE_CATEGORIES = ['Structures', 'Bases'];
 
 export function getBuildablesForCategory(category: string): BuildableEntityType[] {
     if (category === 'Structures') {
         return ['beacon'];
+    }
+    if (category === 'Bases') {
+        return ['outpost'];
     }
     return [];
 }

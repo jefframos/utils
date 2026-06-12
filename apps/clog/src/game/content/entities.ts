@@ -31,6 +31,13 @@ const ENTITY_DEFINITIONS: EntityDefinition[] = [
         viewDef: { color: '#94a3b8', icon: '🏛️', sprite: null },
     },
     {
+        kind: 'outpost',
+        unitType: null,
+        name: 'Outpost',
+        sizeDef: { tilesX: 2, tilesY: 2 },
+        viewDef: { color: '#a78bfa', icon: '🏗️', sprite: null },
+    },
+    {
         kind: 'beacon',
         unitType: null,
         name: 'Beacon',
@@ -87,6 +94,8 @@ export function getEntitySummary(kind: string, unitType?: string | null): string
     switch (kind) {
         case 'base':
             return 'Main operations hub. Spawn and manage workers attached to this station.';
+        case 'outpost':
+            return 'Remote operations hub. Smaller than the main base but can host up to 4 workers.';
         case 'beacon':
             return 'Remote visibility anchor. Remove it to reclaim part of the build cost.';
         case 'player':

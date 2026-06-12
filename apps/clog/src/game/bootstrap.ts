@@ -143,6 +143,7 @@ export async function bootstrapGame(): Promise<void> {
         if (entity.kind === 'worker') return 1;
         if (entity.kind === 'player') return 12;
         if (entity.kind === 'base') return 48;
+        if (entity.kind === 'outpost') return 20;
         return undefined;
     };
 
@@ -222,7 +223,9 @@ export async function bootstrapGame(): Promise<void> {
                     ? 1
                     : entity.kind === 'base'
                         ? 48
-                        : 0;
+                        : entity.kind === 'outpost'
+                            ? 20
+                            : 0;
         const maxSlots = Math.max(0, Math.floor(capacity));
         if (maxSlots <= 0) return null;
 
@@ -396,7 +399,7 @@ export async function bootstrapGame(): Promise<void> {
             if (!inventoryPanel) return;
 
             const state = inventoryPanel.getState();
-            const base = simulation.world.getEntities().find((entry) => entry.kind === 'base');
+            const base = simulation.world.getEntityById('entity-base');
             if (base) {
                 const binding = ensureEntityInventoryContainer(base, state);
                 if (binding) {
@@ -436,7 +439,7 @@ export async function bootstrapGame(): Promise<void> {
             const state = inventoryPanel.getState();
             const dropoffEntity = homeId
                 ? simulation.world.getEntityById(homeId)
-                : simulation.world.getEntities().find((entry) => entry.kind === 'base') ?? null;
+                : simulation.world.getEntityById('entity-base') ?? null;
             if (!dropoffEntity) return;
 
             const binding = ensureEntityInventoryContainer(dropoffEntity, state);
@@ -936,19 +939,33 @@ export async function bootstrapGame(): Promise<void> {
         }
 
         if (event.type === 'EntityPlacementFailed') {
+            const isOutpost = event.entityType === 'outpost';
             const reasonText = {
-                'too_far': 'Beacon is out of builder range',
-                'not_open': 'Beacon must be placed in open space',
+                'too_far': isOutpost ? 'Outpost is out of builder range' : 'Beacon is out of builder range',
+                'not_open': isOutpost ? 'Outpost must be placed in open space' : 'Beacon must be placed in open space',
                 'already_exists': 'Beacon already exists at this location',
-                'unknown_tile': 'Cannot place beacon here',
-                'insufficient_ore': 'Not enough ore (need 10)',
-                'not_builder': 'Selected entity cannot build beacons',
+                'occupied': 'Outpost footprint is blocked by terrain or another entity',
+                'unknown_tile': isOutpost ? 'Cannot place outpost here' : 'Cannot place beacon here',
+                'insufficient_ore': isOutpost ? 'Not enough ore (need 20)' : 'Not enough ore (need 10)',
+                'not_builder': isOutpost ? 'Selected entity cannot build outposts' : 'Selected entity cannot build beacons',
             }[event.reason];
-            panel.setStatus(`Cannot place beacon: ${reasonText}`);
+            const subject = isOutpost ? 'outpost' : 'beacon';
+            const safeReasonText = reasonText ?? `Unknown reason (${String(event.reason)})`;
+            console.warn(`[build] placement failed: ${subject} at (${event.x}, ${event.y}) - ${safeReasonText}`, {
+                entityType: event.entityType,
+                x: event.x,
+                y: event.y,
+                reason: event.reason,
+                reasonText: safeReasonText,
+            });
+            panel.setStatus(`Cannot place ${subject}: ${safeReasonText}`);
         }
 
         if (event.type === 'EntityPlaced') {
-            panel.setStatus(`Beacon placed at (${event.x}, ${event.y}) - Cost: 10 ore`);
+            const isOutpost = event.entityType === 'outpost';
+            panel.setStatus(isOutpost
+                ? `Outpost placed at (${event.x}, ${event.y}) - Cost: 20 ore`
+                : `Beacon placed at (${event.x}, ${event.y}) - Cost: 10 ore`);
             resourcesPanel?.update();
             minimap.refresh();
             if (inventoryPanel) {

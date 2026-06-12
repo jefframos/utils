@@ -62,11 +62,11 @@ export function createWorkersWindow(options: WorkersWindowOptions): WorkersWindo
     spawnTitle.textContent = 'Spawn Workers';
 
     const spawnActions = document.createElement('div');
-    spawnActions.className = 'workers-window-actions';
+    spawnActions.className = 'workers-window-actions workers-window-spawn-actions';
     spawnSection.append(spawnTitle, spawnActions);
 
     const footerActions = document.createElement('div');
-    footerActions.className = 'workers-window-actions';
+    footerActions.className = 'workers-window-actions workers-window-footer-actions';
 
     panel.append(workerSection, spawnSection, footerActions);
     frame.content.appendChild(panel);
@@ -79,8 +79,9 @@ export function createWorkersWindow(options: WorkersWindowOptions): WorkersWindo
         const workers = options.getWorkersForBuilding(currentBaseId);
         const slots = options.getBaseSlotSummary(currentBaseId);
         const capacity = slots?.capacity ?? workers.length;
-        const columns = Math.min(3, Math.max(1, capacity));
-        const rows = Math.max(1, Math.ceil(capacity / columns));
+        const visibleSlots = Math.max(3, capacity);
+        const columns = 3;
+        const rows = Math.max(1, Math.ceil(visibleSlots / columns));
 
         if (slots) {
             summary.textContent = `${slots.used} / ${slots.capacity} occupied`;
@@ -91,10 +92,10 @@ export function createWorkersWindow(options: WorkersWindowOptions): WorkersWindo
         workerGrid.textContent = '';
         workerGrid.style.setProperty('--inventory-columns', String(columns));
         workerGrid.style.setProperty('--inventory-rows', String(rows));
-        workerGrid.style.setProperty('--inventory-cell-size', '58px');
-        workerGrid.style.setProperty('--inventory-gap', '6px');
+        workerGrid.style.setProperty('--inventory-cell-size', '96px');
+        workerGrid.style.setProperty('--inventory-gap', '8px');
 
-        for (let index = 0; index < capacity; index++) {
+        for (let index = 0; index < visibleSlots; index++) {
             const worker = workers[index] ?? null;
             const cell = document.createElement('div');
             cell.className = 'inventory-cell workers-window-cell';
@@ -105,6 +106,7 @@ export function createWorkersWindow(options: WorkersWindowOptions): WorkersWindo
 
             if (worker) {
                 cell.classList.add('is-occupied');
+                cell.classList.add(worker.deployed ? 'is-deployed' : 'is-docked');
                 if (worker.viewDef?.backdrop) {
                     cell.style.setProperty('--inventory-item-backdrop', worker.viewDef.backdrop);
                 }
@@ -113,7 +115,7 @@ export function createWorkersWindow(options: WorkersWindowOptions): WorkersWindo
                 }
 
                 const icon = document.createElement('span');
-                icon.className = 'inventory-item-cell-icon';
+                icon.className = 'workers-window-cell-icon';
                 icon.textContent = worker.viewDef?.icon ?? 'W';
 
                 const label = document.createElement('span');
@@ -137,6 +139,22 @@ export function createWorkersWindow(options: WorkersWindowOptions): WorkersWindo
                 });
 
                 cell.append(icon, label, status, action);
+            } else {
+                cell.classList.add('is-disabled', 'workers-window-cell-empty');
+
+                const icon = document.createElement('span');
+                icon.className = 'workers-window-cell-icon workers-window-cell-icon-empty';
+                icon.textContent = '⚙';
+
+                const label = document.createElement('span');
+                label.className = 'workers-window-cell-label';
+                label.textContent = 'Empty Slot';
+
+                const status = document.createElement('span');
+                status.className = 'workers-window-cell-status';
+                status.textContent = 'Spawn worker to fill';
+
+                cell.append(icon, label, status);
             }
 
             workerGrid.appendChild(cell);
@@ -178,7 +196,7 @@ export function createWorkersWindow(options: WorkersWindowOptions): WorkersWindo
         footerActions.textContent = '';
         const recallAll = document.createElement('button');
         recallAll.type = 'button';
-        recallAll.className = 'ui95-button entity-details-action-btn';
+        recallAll.className = 'ui95-button entity-details-action-btn workers-window-footer-btn';
         recallAll.textContent = 'Recall All Workers';
         recallAll.disabled = workers.every((entry) => !entry.deployed);
         recallAll.addEventListener('click', () => {

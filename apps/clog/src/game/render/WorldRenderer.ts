@@ -177,13 +177,35 @@ export class WorldRenderer {
             const h = sizeDef.tilesY * TILE_SIZE;
 
             if (entity.kind === 'base') {
-                // Base uses a fixed decorative two-layer rect; respect its sizeDef for selection ring
-                const bx = (Math.round(entity.x) - 2) * TILE_SIZE;
-                const by = (Math.round(entity.y) - 2) * TILE_SIZE;
-                this.entityOverlay.rect(bx, by, TILE_SIZE * 5, TILE_SIZE * 5).fill(0x1d4ed8);
-                this.entityOverlay.rect(bx + TILE_SIZE, by + TILE_SIZE, TILE_SIZE * 3, TILE_SIZE * 3).fill(0x93c5fd);
+                // Main base footprint must match simulation footprint (3x3).
+                this.entityOverlay.rect(px, py, w, h).fill(0x1d4ed8);
+                this.entityOverlay.rect(px + TILE_SIZE * 0.5, py + TILE_SIZE * 0.5, TILE_SIZE * 2, TILE_SIZE * 2).fill(0x93c5fd);
                 if (isSelected) {
-                    this.entityOverlay.rect(bx, by, TILE_SIZE * 5, TILE_SIZE * 5).stroke({ color: 0xffffff, width: 3, alpha: 0.9 });
+                    this.entityOverlay.rect(px, py, w, h).stroke({ color: 0xffffff, width: 3, alpha: 0.9 });
+                    // Draw reach area (deposit zone) for base - 2 tiles from each edge
+                    const reach = 2;
+                    const reachPx = (entity.x - reach) * TILE_SIZE;
+                    const reachPy = (entity.y - reach) * TILE_SIZE;
+                    const reachW = (reach * 2 + sizeDef.tilesX) * TILE_SIZE;
+                    const reachH = (reach * 2 + sizeDef.tilesY) * TILE_SIZE;
+                    this.entityOverlay.rect(reachPx, reachPy, reachW, reachH).stroke({ color: 0x60a5fa, width: 1, alpha: 0.5 });
+                }
+                continue;
+            }
+
+            if (entity.kind === 'outpost') {
+                // Outpost is a distinct, smaller static hub (2x2).
+                this.entityOverlay.rect(px, py, w, h).fill(0x7c3aed);
+                this.entityOverlay.rect(px + 4, py + 4, w - 8, h - 8).fill(0xa78bfa);
+                if (isSelected) {
+                    this.entityOverlay.rect(px, py, w, h).stroke({ color: 0xffffff, width: 2, alpha: 0.95 });
+                    // Draw reach area (deposit zone) for outpost - 2 tiles from each edge
+                    const reach = 2;
+                    const reachPx = (entity.x - reach) * TILE_SIZE;
+                    const reachPy = (entity.y - reach) * TILE_SIZE;
+                    const reachW = (reach * 2 + sizeDef.tilesX) * TILE_SIZE;
+                    const reachH = (reach * 2 + sizeDef.tilesY) * TILE_SIZE;
+                    this.entityOverlay.rect(reachPx, reachPy, reachW, reachH).stroke({ color: 0xc084fc, width: 1, alpha: 0.5 });
                 }
                 continue;
             }
