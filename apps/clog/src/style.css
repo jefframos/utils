@@ -173,20 +173,23 @@ canvas {
 }
 
 .resources-panel {
-  position: fixed;
-  top: 50px;
-  left: 12px;
-  z-index: 130;
-  pointer-events: none;
+  width: 100%;
   min-width: 168px;
   padding: 8px 10px;
   background: #c0c0c0;
-  border-top: 2px solid #ffffff;
-  border-left: 2px solid #ffffff;
-  border-right: 2px solid #404040;
-  border-bottom: 2px solid #404040;
-  box-shadow: 1px 1px 0 #000000;
-  border-radius: 0;
+  color: #000000;
+}
+
+.resources-window {
+  min-width: 210px;
+  min-height: 120px;
+  width: 210px;
+  height: auto;
+}
+
+.resources-window .floating-window-content {
+  display: block;
+  overflow: auto;
 }
 
 .resources-panel-title {
@@ -1897,8 +1900,9 @@ body.theme-terminal80s .ui95-button:active {
 
 body.theme-terminal80s .tile-tooltip {
   position: fixed;
-  top: 72px;
-  right: 16px;
+  top: 48px;
+  left: 16px;
+  right: auto;
   max-width: min(360px, calc(100vw - 32px));
   padding: 8px 10px;
   background: rgba(6, 30, 19, 0.95);
@@ -1906,7 +1910,7 @@ body.theme-terminal80s .tile-tooltip {
   border: 1px solid #2dff87;
   border-radius: 0;
   pointer-events: none;
-  z-index: 22000;
+  z-index: 11;
   font-family: "Consolas", "Lucida Console", "Courier New", monospace;
   font-size: 12px;
   line-height: 1.35;
@@ -1926,10 +1930,8 @@ body.theme-terminal80s .tile-tooltip::before {
 
 @media (max-width: 640px) {
   body.theme-terminal80s .tile-tooltip {
-    top: auto;
-    right: 8px;
+    top: 48px;
     left: 8px;
-    bottom: 8px;
     max-width: none;
   }
 }

@@ -1,3 +1,4 @@
+import { createFloatingWindow } from './FloatingWindow';
 import type { InventoryState } from '../inventory/InventoryModel';
 import type { ResourceType } from '../inventory/InventoryModel';
 import { getInventoryItemDefinition } from '../inventory/InventoryModel';
@@ -20,8 +21,23 @@ const RESOURCE_DISPLAY_INFO: Record<ResourceType, { label: string; color: string
 };
 
 export function createResourcesPanel(options: ResourcesPanelOptions): ResourcesPanel {
+    const frame = createFloatingWindow({
+        title: 'Resources',
+        className: 'resources-window',
+        resizable: false,
+        initialState: {
+            open: true,
+            minimized: false,
+            left: 16,
+            top: 92,
+            width: 210,
+            height: 180,
+        },
+    });
+
     const root = document.createElement('div');
     root.className = 'resources-panel';
+    frame.content.appendChild(root);
 
     const update = () => {
         const inventoryState = options.getInventoryState();
@@ -88,11 +104,10 @@ export function createResourcesPanel(options: ResourcesPanelOptions): ResourcesP
     };
 
     update();
-    document.body.appendChild(root);
 
     return {
         destroy: () => {
-            root.remove();
+            frame.destroy();
         },
         update,
     };

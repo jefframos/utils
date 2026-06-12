@@ -155,7 +155,7 @@ this.pendingWorkerOreDeliveries.push({
 
 ## Entity Inventory Definitions
 
-From `entityDefinitions.ts`:
+From `entities.ts`:
 
 | Entity | Capacity | Type |
 |--------|----------|------|

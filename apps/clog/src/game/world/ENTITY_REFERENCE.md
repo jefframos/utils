@@ -108,6 +108,6 @@ This document outlines the components and capabilities of each entity type in th
 - **MovementSystem**: Handles all entity pathfinding and position updates
 - **MiningSystem**: Handles ore gathering, cooldowns, and retargeting
 - **CommandQueueSystem**: Manages command progression and entity actions
-- **EntityDefinitions**: Centralized data about entity types, costs, and capabilities
+- **Entity definitions**: Centralized data about entity types in `src/game/content/entities.ts`
 
 All systems are decoupled from WorldModel and can be tested independently.

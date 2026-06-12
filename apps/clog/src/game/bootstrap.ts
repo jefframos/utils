@@ -2,7 +2,7 @@ import { Application } from 'pixi.js';
 import { LocalTransport } from './core/LocalTransport';
 import { GameSimulation } from './core/GameSimulation';
 import type { GameEvent } from './core/protocol';
-import { WEAPON_DEFINITIONS } from './core/ToolComponent';
+import { TOOL_DEFINITIONS } from './content/tools.ts';
 import { GameScene } from './scenes/GameScene';
 import { GameMetaStore } from './meta/GameMetaStore';
 import { createMapControlPanel } from './ui/MapControlPanel';
@@ -39,7 +39,7 @@ import { getBiomeGenerationNodeGraphMermaid } from './world/noise';
 import type { EntityInventoryAdapter } from './ui/EntityDetailsWindow';
 import type { WorldEntity } from './world/WorldModel';
 import { BIOME_DEFINITIONS } from './content/biomes';
-import { getEntityLabel } from './content/entityDefinitions';
+import { getEntityLabel } from './content/entities.ts';
 
 export async function bootstrapGame(): Promise<void> {
     const app = new Application();
@@ -363,7 +363,7 @@ export async function bootstrapGame(): Promise<void> {
             inventoryItemDetails?.open();
         },
         onEquipTool: (toolId) => {
-            const next = WEAPON_DEFINITIONS.find((entry) => entry.id === toolId);
+            const next = TOOL_DEFINITIONS.find((entry) => entry.id === toolId);
             if (!next) return;
             simulation.tools.setActiveTool(next);
             inventoryPanel?.setEquippedTool(next.id);
@@ -375,9 +375,9 @@ export async function bootstrapGame(): Promise<void> {
         app,
         simulation.world,
         transport,
-        () => WEAPON_DEFINITIONS.find((entry) => entry.id === mainActionToolId) ?? simulation.tools.getActiveTool(),
+        () => TOOL_DEFINITIONS.find((entry) => entry.id === mainActionToolId) ?? simulation.tools.getActiveTool(),
         (toolId) => {
-            const next = WEAPON_DEFINITIONS.find((entry) => entry.id === toolId);
+            const next = TOOL_DEFINITIONS.find((entry) => entry.id === toolId);
             if (!next) return;
             simulation.tools.setActiveTool(next);
             inventoryPanel?.setEquippedTool(next.id);
@@ -675,7 +675,7 @@ export async function bootstrapGame(): Promise<void> {
 
     const renderActionHotbar = () => {
         const equippedId = simulation.tools.getActiveTool().id;
-        const mainTool = WEAPON_DEFINITIONS.find((entry) => entry.id === mainActionToolId);
+        const mainTool = TOOL_DEFINITIONS.find((entry) => entry.id === mainActionToolId);
 
         if (mainTool) {
             mainActionButton.title = `Active tool: ${mainTool.name}`;
@@ -695,7 +695,7 @@ export async function bootstrapGame(): Promise<void> {
     };
 
     const applyEquippedTool = (toolId: string, setMainSlot: boolean): void => {
-        const next = WEAPON_DEFINITIONS.find((entry) => entry.id === toolId);
+        const next = TOOL_DEFINITIONS.find((entry) => entry.id === toolId);
         if (!next) return;
         simulation.tools.setActiveTool(next);
         inventoryPanel?.setEquippedTool(next.id);
@@ -733,7 +733,9 @@ export async function bootstrapGame(): Promise<void> {
     mapToggleButton.setAttribute('aria-label', 'Toggle map window');
     mapToggleButton.innerHTML = `<span class="action-button-icon" aria-hidden="true">${makeIconSvg('map')}</span>`;
 
-    const debugToggleButton = createActionButton('debug', 'Debug', 'Show or hide camera debug crosshair');
+    const debugToggleButton = createActionButton('debug', 'Debug', 'Open or close the debug graph window');
+    const perfToggleButton = createActionButton('debug', 'Perf Overlay', 'Toggle the on-screen performance overlay');
+    let isDebugWindowOpen = false;
     const debugWindow = createDebugGraphWindow({
         initialWindowState: {
             open: false,
@@ -743,8 +745,10 @@ export async function bootstrapGame(): Promise<void> {
             width: 560,
             height: 440,
         },
-        onWindowStateChange: () => {
-            debugToggleButton.classList.toggle('is-active', scene.isDebugOverlayVisible());
+        onWindowStateChange: (state) => {
+            isDebugWindowOpen = state.open;
+            debugToggleButton.classList.toggle('is-active', isDebugWindowOpen);
+            perfToggleButton.classList.toggle('is-active', scene.isDebugOverlayVisible());
         },
         getModuleIds: () => moduleHost.listModuleIds(),
         getBehaviorIds: () => engine.listBehaviorIds(),
@@ -757,11 +761,16 @@ export async function bootstrapGame(): Promise<void> {
 
     debugToggleButton.addEventListener('click', () => {
         debugWindow.toggle();
-        debugToggleButton.classList.toggle('is-active', scene.isDebugOverlayVisible());
     });
-    debugToggleButton.classList.toggle('is-active', scene.isDebugOverlayVisible());
+    debugToggleButton.classList.toggle('is-active', isDebugWindowOpen);
 
-    actionBar.root.append(snapBaseButton, inventoryButton, mapToggleButton, debugToggleButton);
+    perfToggleButton.addEventListener('click', () => {
+        scene.toggleDebugOverlay();
+        perfToggleButton.classList.toggle('is-active', scene.isDebugOverlayVisible());
+    });
+    perfToggleButton.classList.toggle('is-active', scene.isDebugOverlayVisible());
+
+    actionBar.root.append(snapBaseButton, inventoryButton, mapToggleButton, perfToggleButton, debugToggleButton);
     document.body.appendChild(actionBar.root);
     document.body.appendChild(actionHotbar);
 
@@ -771,7 +780,7 @@ export async function bootstrapGame(): Promise<void> {
 
     const panel = createMapControlPanel({
         initialSeed: simulation.world.getSeed(),
-        weapons: WEAPON_DEFINITIONS,
+        weapons: TOOL_DEFINITIONS,
         initialWeaponId: simulation.tools.getActiveTool().id,
         initialWindowState: initialMapControls,
         onWindowStateChange: (state) => {
@@ -779,7 +788,7 @@ export async function bootstrapGame(): Promise<void> {
         },
         onSelectWeapon: (weaponId) => {
             applyEquippedTool(weaponId, true);
-            const next = WEAPON_DEFINITIONS.find((entry) => entry.id === weaponId);
+            const next = TOOL_DEFINITIONS.find((entry) => entry.id === weaponId);
             if (!next) return;
             panel.setStatus(`Selected weapon: ${next.name}.`);
         },
@@ -810,7 +819,7 @@ export async function bootstrapGame(): Promise<void> {
     });
 
     toolInspector = createToolInspectorPanel({
-        tools: WEAPON_DEFINITIONS,
+        tools: TOOL_DEFINITIONS,
         initialToolId: simulation.tools.getActiveTool().id,
         initialWindowState: initialToolInspector,
         onWindowStateChange: (state) => {

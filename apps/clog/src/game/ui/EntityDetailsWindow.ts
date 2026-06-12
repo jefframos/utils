@@ -4,7 +4,7 @@ import type { EntityDetailsWindowMeta } from '../meta/GameMetaStore';
 import type { InventoryItemDefinition, InventoryItemInstance, InventoryLocation } from '../inventory/ItemDefinitions';
 import { canPlaceAt, getInventoryItemDefinition, moveItemWithRules, type InventoryState } from '../inventory/InventoryModel';
 import { WORKER_DEFINITIONS } from '../content/workers';
-import { getEntityLabel, getEntitySummary } from '../content/entityDefinitions';
+import { getEntityLabel, getEntitySummary } from '../content/entities.ts';
 
 type EntityDetailsWindowOptions = {
     onDeleteBeacon: (entityId: string) => void;
@@ -591,8 +591,10 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
                 workersGrid.textContent = '';
             }
 
-            frame.setOpen(true);
-            frame.setMinimized(false);
+            const frameState = frame.getState();
+            if (!frameState.open) {
+                frame.setOpen(true);
+            }
         },
         clearSelection: () => {
             currentEntity = null;
@@ -611,7 +613,6 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
         },
         close: () => {
             frame.setOpen(false);
-            frame.setMinimized(false);
         },
         destroy: () => {
             unsubscribeInventory?.();

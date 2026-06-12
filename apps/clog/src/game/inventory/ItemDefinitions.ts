@@ -1,4 +1,4 @@
-import { WEAPON_DEFINITIONS } from '../core/ToolComponent';
+import { TOOL_DEFINITIONS } from '../content/tools.ts';
 
 export type InventoryItemType = 'tool' | 'resource';
 
@@ -78,19 +78,19 @@ function createSingleCellShape(): InventoryShape {
 }
 
 function toolAttributes(toolId: string): InventoryItemAttributes {
-    const weapon = WEAPON_DEFINITIONS.find((entry) => entry.id === toolId);
-    if (!weapon) {
+    const tool = TOOL_DEFINITIONS.find((entry) => entry.id === toolId);
+    if (!tool) {
         return {};
     }
 
     return {
-        durability: weapon.damageMode === 'blunt' ? 140 : 100,
-        tileDamage: weapon.tileDamage,
-        damageMode: weapon.damageMode,
-        bluntRadius: weapon.bluntRadius,
-        hitsPerSecond: weapon.hitsPerSecond,
-        hitOnClick: weapon.hitOnClick,
-        hitOnHold: weapon.hitOnHold,
+        durability: tool.damageMode === 'blunt' ? 140 : 100,
+        tileDamage: tool.tileDamage,
+        damageMode: tool.damageMode,
+        bluntRadius: tool.bluntRadius,
+        hitsPerSecond: tool.hitsPerSecond,
+        hitOnClick: tool.hitOnClick,
+        hitOnHold: tool.hitOnHold,
     };
 }
 

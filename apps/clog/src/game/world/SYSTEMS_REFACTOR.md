@@ -5,7 +5,7 @@ Successfully separated WorldModel's monolithic behavior into three independent, 
 
 ## Deliverables
 
-### 1. Entity Definitions Layer (`entityDefinitions.ts`)
+### 1. Entity Definitions Layer (`content/entities.ts`)
 **Purpose**: Centralized, data-driven entity configuration
 
 **Features**:
@@ -93,7 +93,7 @@ Successfully separated WorldModel's monolithic behavior into three independent, 
 
 ## Entity Type Visibility
 
-All entity capabilities are now explicit in `entityDefinitions.ts`:
+All entity capabilities are now explicit in `content/entities.ts`:
 
 | Entity | Components | Build/Spawn | Cost |
 |--------|-----------|----------|------|
@@ -114,12 +114,12 @@ See `ENTITY_REFERENCE.md` for complete details.
 - ✅ Clear separation of concerns
 
 ### Maintainability
-- ✅ Entity capabilities visible in one place (entityDefinitions.ts)
+- ✅ Entity capabilities visible in one place (content/entities.ts)
 - ✅ System logic independent and testable
 - ✅ Easy to modify costs, limits, or component definitions
 
 ### Extensibility
-- ✅ New entity types added by extending entityDefinitions.ts
+- ✅ New entity types added by extending content/entities.ts
 - ✅ New behaviors added as new systems
 - ✅ Existing systems unchanged when adding features
 - ✅ Build limits enforced at data layer
@@ -134,7 +134,7 @@ See `ENTITY_REFERENCE.md` for complete details.
 ## Files Modified/Created
 
 ### New Files
-- `src/game/world/entityDefinitions.ts` - Entity type registry with costs & capabilities
+- `src/game/content/entities.ts` - Entity type registry with names, size, and visual definitions
 - `src/game/world/systems/MovementSystem.ts` - Movement behavior
 - `src/game/world/systems/MiningSystem.ts` - Mining behavior  
 - `src/game/world/systems/CommandQueueSystem.ts` - Command queue logic

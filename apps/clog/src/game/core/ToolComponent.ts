@@ -1,42 +1,6 @@
-export type ToolDefinition = {
-    id: string;
-    name: string;
-    tileDamage: number;
-    hitOnClick: boolean;
-    hitOnHold: boolean;
-    hitsPerSecond: number;
-    damageMode: 'precise' | 'blunt';
-    bluntRadius: number;
-};
+import { DEFAULT_TOOL, TOOL_DEFINITIONS, type ToolDefinition } from '../content/tools.ts';
 
-export const WEAPON_DEFINITIONS: ToolDefinition[] = [
-    {
-        id: 'starter-cutter',
-        name: 'Starter Cutter',
-        tileDamage: 3,
-        hitOnClick: true,
-        hitOnHold: true,
-        hitsPerSecond: 3,
-        damageMode: 'precise',
-        bluntRadius: 0,
-    },
-    {
-        id: 'shock-mallet',
-        name: 'Shock Mallet',
-        tileDamage: 2,
-        hitOnClick: true,
-        hitOnHold: false,
-        hitsPerSecond: 3,
-        damageMode: 'blunt',
-        bluntRadius: 1,
-    },
-];
-
-export const DEFAULT_TOOL: ToolDefinition = WEAPON_DEFINITIONS[0];
-
-export function getToolDefinition(toolId: string): ToolDefinition | undefined {
-    return WEAPON_DEFINITIONS.find((entry) => entry.id === toolId);
-}
+export type { ToolDefinition } from '../content/tools.ts';
 
 export class ToolComponent {
     private activeTool: ToolDefinition;
@@ -54,6 +18,6 @@ export class ToolComponent {
     }
 
     getAllTools(): ToolDefinition[] {
-        return WEAPON_DEFINITIONS;
+        return TOOL_DEFINITIONS;
     }
 }

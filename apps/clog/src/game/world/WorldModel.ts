@@ -1,10 +1,10 @@
 ﻿import { BASE_START_X, BASE_START_Y, CHUNK_SIZE, GAME_RULES, WORLD_HEIGHT, WORLD_WIDTH } from '../config';
 import { BIOME_DEFINITIONS } from '../content/biomes';
+import { getEntityDefinition, type EntitySizeDef, type EntityViewDef } from '../content/entities.ts';
+import { getToolDefinition } from '../content/tools.ts';
 import { carveOpen, createHiddenSpaceTile, createSolidTile, damageTile } from '../content/tiles';
 import { getWorkerDefinition, type WorkerUnitType } from '../content/workers';
-import { getEntityDefinition, type EntitySizeDef, type EntityViewDef } from '../content/entityDefinitions';
 import { CommandListComponent, type CommandListState, type EnqueueMode } from '../core/CommandListComponent';
-import { getToolDefinition } from '../core/ToolComponent';
 import type { TileDamageHit } from '../core/protocol.ts';
 import type { Tile, VisibilityState } from '../types';
 import {
@@ -30,7 +30,7 @@ export type WorldEntityKind = 'base' | 'beacon' | 'worker' | 'player';
 export type WorldEntityMobility = 'static' | 'dynamic';
 export type { WorkerUnitType } from '../content/workers';
 
-export type { EntitySizeDef, EntityViewDef } from '../content/entityDefinitions';
+export type { EntitySizeDef, EntityViewDef } from '../content/entities.ts';
 
 export type EntityWalkingDefinition = {
     speedTilesPerSecond: number;
@@ -223,6 +223,20 @@ const ORE_UNITS_PER_SLOT = 99;
 
 type BeaconNode = SavedBeacon;
 
+export type WorldPerformanceSnapshot = {
+    tickMs: number;
+    tickCalls: number;
+    pathfindMs: number;
+    pathfindCalls: number;
+    minePlanMs: number;
+    minePlanCalls: number;
+    dropoffSearchMs: number;
+    dropoffSearchCalls: number;
+    workerCount: number;
+    movingWorkers: number;
+    miningWorkers: number;
+};
+
 export class WorldModel {
     private widthValue = WORLD_WIDTH;
     private heightValue = WORLD_HEIGHT;
@@ -249,6 +263,19 @@ export class WorldModel {
     private readonly rules: WorldRules;
     private transientMineState: { x: number; y: number; time: number } | null = null;
     private transientDamageTiles = new Set<string>();
+    private performanceStats: WorldPerformanceSnapshot = {
+        tickMs: 0,
+        tickCalls: 0,
+        pathfindMs: 0,
+        pathfindCalls: 0,
+        minePlanMs: 0,
+        minePlanCalls: 0,
+        dropoffSearchMs: 0,
+        dropoffSearchCalls: 0,
+        workerCount: 0,
+        movingWorkers: 0,
+        miningWorkers: 0,
+    };
     private baseXValue = BASE_START_X;
     private baseYValue = BASE_START_Y;
     private nextBeaconIndex = 1;
@@ -534,6 +561,24 @@ export class WorldModel {
 
     drainWorkerDamageHits(): TileDamageHit[] {
         return this.pendingWorkerDamageHits.splice(0, this.pendingWorkerDamageHits.length);
+    }
+
+    drainPerformanceStats(): WorldPerformanceSnapshot {
+        const snapshot = { ...this.performanceStats };
+        this.performanceStats = {
+            tickMs: 0,
+            tickCalls: 0,
+            pathfindMs: 0,
+            pathfindCalls: 0,
+            minePlanMs: 0,
+            minePlanCalls: 0,
+            dropoffSearchMs: 0,
+            dropoffSearchCalls: 0,
+            workerCount: 0,
+            movingWorkers: 0,
+            miningWorkers: 0,
+        };
+        return snapshot;
     }
 
     getBeaconPlacementFailureReason(x: number, y: number, builderEntityId?: string): 'too_far' | 'not_open' | 'already_exists' | 'unknown_tile' | 'not_builder' {
@@ -1100,10 +1145,15 @@ export class WorldModel {
 
     tickFixed(deltaMs: number): void {
         if (deltaMs <= 0) return;
+        const tickStart = performance.now();
 
         const movedWorkers: WorldEntity[] = [];
+        let workerCount = 0;
+        let movingWorkers = 0;
+        let miningWorkers = 0;
         for (const entity of this.entities.values()) {
             if (entity.kind !== 'worker') continue;
+            workerCount++;
             const previousX = entity.x;
             const previousY = entity.y;
 
@@ -1114,6 +1164,7 @@ export class WorldModel {
             this.tryStartNextEntityCommand(entity);
 
             if (!entity.commandsPaused && entity.movement) {
+                movingWorkers++;
                 const speed = Math.max(0.1, entity.walking?.speedTilesPerSecond ?? entity.moveSpeedTilesPerSecond ?? getWorkerDefinition(entity.unitType ?? 'basic-worker').moveSpeedTilesPerSecond);
                 let remainingTiles = (speed * deltaMs) / 1000;
 
@@ -1224,6 +1275,7 @@ export class WorldModel {
             }
 
             if (!entity.commandsPaused && entity.mining) {
+                miningWorkers++;
                 if (entity.deployed && !entity.movement) {
                     const mining = entity.mining;
                     const atApproach = Math.round(entity.x) === mining.approachX && Math.round(entity.y) === mining.approachY;
@@ -1393,6 +1445,10 @@ export class WorldModel {
             }
         }
 
+        this.performanceStats.workerCount += workerCount;
+        this.performanceStats.movingWorkers += movingWorkers;
+        this.performanceStats.miningWorkers += miningWorkers;
+
         const player = this.getMainPlayerEntity();
         if (player) {
             const previousX = player.x;
@@ -1545,6 +1601,9 @@ export class WorldModel {
                                         }
                                     }
                                 }
+
+                                this.performanceStats.tickMs += performance.now() - tickStart;
+                                this.performanceStats.tickCalls += 1;
                             }
 
                             if (hit.opened) {
@@ -2730,6 +2789,7 @@ export class WorldModel {
         maxSteps: number,
         sizeDef?: { tilesX: number; tilesY: number },
     ): Array<{ x: number; y: number }> | null {
+        const perfStart = performance.now();
         fromX = Math.round(fromX);
         fromY = Math.round(fromY);
         toX = Math.round(toX);
@@ -2749,7 +2809,11 @@ export class WorldModel {
             return true;
         };
 
-        if (!canStand(fromX, fromY) || !canStand(toX, toY)) return null;
+        if (!canStand(fromX, fromY) || !canStand(toX, toY)) {
+            this.performanceStats.pathfindMs += performance.now() - perfStart;
+            this.performanceStats.pathfindCalls += 1;
+            return null;
+        }
 
         const queue: Array<{ x: number; y: number }> = [{ x: fromX, y: fromY }];
         const previous = new Map<string, string | null>();
@@ -2767,6 +2831,8 @@ export class WorldModel {
                     key = previous.get(key) ?? null;
                 }
                 path.reverse();
+                this.performanceStats.pathfindMs += performance.now() - perfStart;
+                this.performanceStats.pathfindCalls += 1;
                 return path;
             }
 
@@ -2781,6 +2847,8 @@ export class WorldModel {
             }
         }
 
+        this.performanceStats.pathfindMs += performance.now() - perfStart;
+        this.performanceStats.pathfindCalls += 1;
         return null;
     }
 
@@ -3005,11 +3073,12 @@ export class WorldModel {
             lastMinedY: number;
         },
     ): ScanNearestPlan | null {
+        const perfStart = performance.now();
         const home = worker.homeId ? this.entities.get(worker.homeId) : this.getBaseEntity();
         const baseX = Math.round(home?.x ?? this.baseX);
         const baseY = Math.round(home?.y ?? this.baseY);
 
-        return this.scanNearestBehavior.chooseNextPlan({
+        const plan = this.scanNearestBehavior.chooseNextPlan({
             workerX: worker.x,
             workerY: worker.y,
             anchorX: options.anchorX,
@@ -3026,6 +3095,9 @@ export class WorldModel {
             countSolidNeighbors: (x, y) => this.countSolidNeighbors(x, y),
             buildPath: (fromX, fromY, toX, toY) => this.findOpenPath(fromX, fromY, toX, toY, 25000, worker.sizeDef),
         });
+        this.performanceStats.minePlanMs += performance.now() - perfStart;
+        this.performanceStats.minePlanCalls += 1;
+        return plan;
     }
 
     private reserveMineTarget(x: number, y: number, workerId: string): boolean {
@@ -3249,6 +3321,7 @@ export class WorldModel {
     }
 
     private findNearestDropoffTile(base: WorldEntity, fromX: number, fromY: number, sizeDef?: EntitySizeDef, ignoreEntityId?: string): { x: number; y: number } | null {
+        const perfStart = performance.now();
         const startX = Math.round(fromX);
         const startY = Math.round(fromY);
         const maxRadius = 4;
@@ -3268,7 +3341,10 @@ export class WorldModel {
             }
         }
 
-        return best ? { x: best.x, y: best.y } : this.findDeploymentTile(base, sizeDef, ignoreEntityId);
+        const result = best ? { x: best.x, y: best.y } : this.findDeploymentTile(base, sizeDef, ignoreEntityId);
+        this.performanceStats.dropoffSearchMs += performance.now() - perfStart;
+        this.performanceStats.dropoffSearchCalls += 1;
+        return result;
     }
 
     private rebuildMineReservationsFromEntities(): void {

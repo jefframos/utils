@@ -1,7 +1,7 @@
 import { Container, Graphics } from 'pixi.js';
 import { LOD_TILE_DETAIL_MIN_ZOOM, TILE_SIZE } from '../config';
 import { BIOME_DEFINITIONS } from '../content/biomes';
-import { getEntityDefinition } from '../content/entityDefinitions';
+import { getEntityDefinition } from '../content/entities.ts';
 import { spaceDustStrength, surfaceNoise } from '../world/noise';
 import { WorldModel } from '../world/WorldModel';
 

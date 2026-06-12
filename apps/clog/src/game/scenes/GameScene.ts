@@ -1,4 +1,5 @@
 ﻿import { Application, BitmapFont, BitmapText, Container, FederatedPointerEvent, Graphics, Point } from 'pixi.js';
+import type { ToolDefinition } from '../content/tools.ts';
 import {
     TILE_SIZE,
     ZOOM_IN_FACTOR,
@@ -6,18 +7,18 @@ import {
     ZOOM_MIN,
     ZOOM_OUT_FACTOR
 } from '../config';
-import type { ToolDefinition } from '../core/ToolComponent';
 import type { GameTransport, TileDamageHit } from '../core/protocol';
 import type { EntityDetailsWindowMeta } from '../meta/GameMetaStore';
 import { GameCamera, type WorldViewportRect } from '../camera/GameCamera';
 import { ViewportSpace } from '../core/ViewportSpace';
 import { WorldRenderer } from '../render/WorldRenderer';
-import { WorldModel, type WorldEntity } from '../world/WorldModel';
+import { WorldModel, type WorldEntity, type WorldPerformanceSnapshot } from '../world/WorldModel';
 import { createContextMenuTemplate } from '../ui/ContextMenuTemplate';
 import { createEntityDetailsWindow, type EntityInventoryAdapter } from '../ui/EntityDetailsWindow';
 import { createEntityFooter, type EntityFooter } from '../ui/EntityFooter';
 import { createBuildPanel, type BuildPanel, type BuildPanelMeta } from '../ui/BuildPanel';
 import type { BuildableEntityType } from '../content/buildables';
+import { getEntityLabel } from '../content/entities.ts';
 import { addInventoryItem, getInventoryItemDefinition, normalizeInventoryId } from '../inventory/InventoryModel';
 
 export class GameScene {
@@ -34,6 +35,7 @@ export class GameScene {
     private readonly debugScreenCenter = new Graphics();
     private readonly debugWorldCenter = new Graphics();
     private readonly debugCenterDelta = new Graphics();
+    private readonly performanceDiagnostic = document.createElement('div');
 
     private readonly gameCamera: GameCamera;
     private readonly viewportSpace: ViewportSpace;
@@ -67,6 +69,36 @@ export class GameScene {
     private readonly pendingDepositOrders = new Map<string, { storageId: string }>();
     private readonly tileTooltip: HTMLDivElement;
     private getTileInfoForDisplay?: (tileX: number, tileY: number) => string | null;
+    private performanceDiagnosticCopyFeedbackTimeoutId: number | null = null;
+    private framePerfSample = {
+        sampleStartedAt: performance.now(),
+        frames: 0,
+        totalFrameMs: 0,
+        maxFrameMs: 0,
+        fixedUpdateMs: 0,
+        fixedSteps: 0,
+        entityRefreshes: 0,
+        entityRefreshMs: 0,
+        chunkEnsureMs: 0,
+        flushMs: 0,
+        holdMiningMs: 0,
+        popupMs: 0,
+        buildOverlayMs: 0,
+        debugOverlayMs: 0,
+        world: {
+            tickMs: 0,
+            tickCalls: 0,
+            pathfindMs: 0,
+            pathfindCalls: 0,
+            minePlanMs: 0,
+            minePlanCalls: 0,
+            dropoffSearchMs: 0,
+            dropoffSearchCalls: 0,
+            workerCount: 0,
+            movingWorkers: 0,
+            miningWorkers: 0,
+        } as WorldPerformanceSnapshot,
+    };
 
     constructor(
         private readonly app: Application,
@@ -226,7 +258,33 @@ export class GameScene {
         this.tileTooltip = document.createElement('div');
         this.tileTooltip.className = 'tile-tooltip';
         this.tileTooltip.textContent = 'Tile: move cursor over map';
+        this.tileTooltip.style.display = 'block';
+        this.tileTooltip.style.position = 'fixed';
+        this.tileTooltip.style.left = '16px';
+        this.tileTooltip.style.top = '48px';
+        this.tileTooltip.style.zIndex = '11';
         document.body.appendChild(this.tileTooltip);
+
+        this.performanceDiagnostic.className = 'performance-diagnostic';
+        this.performanceDiagnostic.style.position = 'fixed';
+        this.performanceDiagnostic.style.right = '12px';
+        this.performanceDiagnostic.style.bottom = '12px';
+        this.performanceDiagnostic.style.zIndex = '10020';
+        this.performanceDiagnostic.style.padding = '10px 12px';
+        this.performanceDiagnostic.style.whiteSpace = 'pre';
+        this.performanceDiagnostic.style.font = '12px/1.35 Consolas, Monaco, monospace';
+        this.performanceDiagnostic.style.background = 'rgba(3, 10, 6, 0.88)';
+        this.performanceDiagnostic.style.border = '1px solid rgba(74, 222, 128, 0.45)';
+        this.performanceDiagnostic.style.color = '#bbf7d0';
+        this.performanceDiagnostic.style.pointerEvents = 'auto';
+        this.performanceDiagnostic.style.cursor = 'copy';
+        this.performanceDiagnostic.style.display = 'none';
+        this.performanceDiagnostic.textContent = 'perf: collecting sample...';
+        this.performanceDiagnostic.title = 'Click to copy performance sample';
+        this.performanceDiagnostic.addEventListener('click', () => {
+            void this.copyPerformanceDiagnosticToClipboard();
+        });
+        document.body.appendChild(this.performanceDiagnostic);
     }
 
     public getViewportWorldRectTiles(): WorldViewportRect {
@@ -267,15 +325,54 @@ export class GameScene {
 
         this.renderer.flushDirtyChunks(this.camera.scale.x);
         this.app.ticker.add(() => {
-            this.runFixedUpdates(this.app.ticker.deltaMS);
+            const frameStart = performance.now();
+
+            const fixedStart = performance.now();
+            const fixedStats = this.runFixedUpdates(this.app.ticker.deltaMS);
+            const fixedUpdateMs = performance.now() - fixedStart;
+
+            const chunkStart = performance.now();
             this.world.ensureChunksForViewport(this.getViewportWorldRectTiles(), 1);
+            const chunkEnsureMs = performance.now() - chunkStart;
+
+            const flushStart = performance.now();
             this.renderer.flushDirtyChunks(this.camera.scale.x);
+            const flushMs = performance.now() - flushStart;
+
+            const holdStart = performance.now();
             this.updateHoldMining(this.app.ticker.deltaMS);
+            const holdMiningMs = performance.now() - holdStart;
+
+            const popupStart = performance.now();
             this.updateDamagePopups(this.app.ticker.deltaMS);
+            const popupMs = performance.now() - popupStart;
+
+            const buildStart = performance.now();
             this.updateBuildModeOverlay();
+            const buildOverlayMs = performance.now() - buildStart;
+
+            let debugOverlayMs = 0;
             if (this.debugOverlayEnabled) {
+                const debugStart = performance.now();
                 this.updateDebugOverlay();
+                debugOverlayMs = performance.now() - debugStart;
             }
+
+            const frameMs = performance.now() - frameStart;
+            this.recordPerformanceSample({
+                frameMs,
+                fixedUpdateMs,
+                fixedSteps: fixedStats.steps,
+                entityRefreshes: fixedStats.entityRefreshes,
+                entityRefreshMs: fixedStats.entityRefreshMs,
+                chunkEnsureMs,
+                flushMs,
+                holdMiningMs,
+                popupMs,
+                buildOverlayMs,
+                debugOverlayMs,
+                world: this.world.drainPerformanceStats(),
+            });
         });
     }
 
@@ -286,13 +383,19 @@ export class GameScene {
     public setDebugOverlayEnabled(enabled: boolean): void {
         this.debugOverlayEnabled = enabled;
         this.screenOverlayLayer.visible = enabled;
+        this.performanceDiagnostic.style.display = enabled ? 'block' : 'none';
         if (enabled) {
             this.updateDebugOverlay();
+            this.performanceDiagnostic.textContent = 'perf: collecting sample...';
         }
     }
 
     public isDebugOverlayVisible(): boolean {
         return this.debugOverlayEnabled;
+    }
+
+    public toggleDebugOverlay(): void {
+        this.setDebugOverlayEnabled(!this.debugOverlayEnabled);
     }
 
     public onCameraChanged(listener: () => void): () => void {
@@ -415,9 +518,6 @@ export class GameScene {
         this.app.stage.on('pointermove', this.onPointerMove, this);
         this.app.stage.on('pointerup', this.onPointerUp, this);
         this.app.stage.on('pointerupoutside', this.onPointerUp, this);
-        this.app.stage.on('pointerout', () => {
-            this.tileTooltip.style.display = 'none';
-        });
 
         // Prevent browser auto-scroll when middle mouse is pressed over the canvas.
         this.app.canvas.addEventListener('mousedown', this.onCanvasMouseDown);
@@ -493,12 +593,19 @@ export class GameScene {
         const tx = Math.floor(worldPos.x / TILE_SIZE);
         const ty = Math.floor(worldPos.y / TILE_SIZE);
         const tileInfo = this.getTileInfoForDisplay?.(tx, ty);
+        const hoveredEntity = this.world.getEntityAtTile(tx, ty);
+        const entityInfo = hoveredEntity
+            ? ` | Entity: ${getEntityLabel(hoveredEntity.kind, hoveredEntity.unitType)} (${hoveredEntity.id})`
+            : '';
 
         if (tileInfo) {
-            this.tileTooltip.textContent = tileInfo;
+            this.tileTooltip.textContent = `${tileInfo}${entityInfo}`;
         } else {
-            this.tileTooltip.textContent = 'Tile: outside world bounds';
+            this.tileTooltip.textContent = entityInfo
+                ? `Tile: outside world bounds${entityInfo}`
+                : 'Tile: outside world bounds';
         }
+        this.tileTooltip.style.display = 'block';
 
         if (!this.isMiddlePanning) return;
 
@@ -893,9 +1000,11 @@ export class GameScene {
         this.entityFooter.setEntity(selected);
     }
 
-    private runFixedUpdates(deltaMs: number): void {
+    private runFixedUpdates(deltaMs: number): { steps: number; entityRefreshes: number; entityRefreshMs: number } {
         this.fixedUpdateAccumulatorMs += deltaMs;
         let steps = 0;
+        let entityRefreshes = 0;
+        let entityRefreshMs = 0;
 
         while (this.fixedUpdateAccumulatorMs >= GameScene.FIXED_STEP_MS && steps < GameScene.MAX_FIXED_STEPS_PER_FRAME) {
             this.world.tickFixed(GameScene.FIXED_STEP_MS);
@@ -921,7 +1030,10 @@ export class GameScene {
             if (this.selectedEntityId) {
                 const selectedEntity = this.world.getEntityById(this.selectedEntityId);
                 if (selectedEntity && (selectedEntity.mining || selectedEntity.movement)) {
+                    const refreshStart = performance.now();
                     this.refreshSelectedEntityDetails();
+                    entityRefreshMs += performance.now() - refreshStart;
+                    entityRefreshes++;
                 }
             }
             this.fixedUpdateAccumulatorMs -= GameScene.FIXED_STEP_MS;
@@ -931,6 +1043,126 @@ export class GameScene {
         if (steps === GameScene.MAX_FIXED_STEPS_PER_FRAME) {
             this.fixedUpdateAccumulatorMs = Math.min(this.fixedUpdateAccumulatorMs, GameScene.FIXED_STEP_MS);
         }
+
+        return { steps, entityRefreshes, entityRefreshMs };
+    }
+
+    private recordPerformanceSample(sample: {
+        frameMs: number;
+        fixedUpdateMs: number;
+        fixedSteps: number;
+        entityRefreshes: number;
+        entityRefreshMs: number;
+        chunkEnsureMs: number;
+        flushMs: number;
+        holdMiningMs: number;
+        popupMs: number;
+        buildOverlayMs: number;
+        debugOverlayMs: number;
+        world: WorldPerformanceSnapshot;
+    }): void {
+        const perf = this.framePerfSample;
+        perf.frames += 1;
+        perf.totalFrameMs += sample.frameMs;
+        perf.maxFrameMs = Math.max(perf.maxFrameMs, sample.frameMs);
+        perf.fixedUpdateMs += sample.fixedUpdateMs;
+        perf.fixedSteps += sample.fixedSteps;
+        perf.entityRefreshes += sample.entityRefreshes;
+        perf.entityRefreshMs += sample.entityRefreshMs;
+        perf.chunkEnsureMs += sample.chunkEnsureMs;
+        perf.flushMs += sample.flushMs;
+        perf.holdMiningMs += sample.holdMiningMs;
+        perf.popupMs += sample.popupMs;
+        perf.buildOverlayMs += sample.buildOverlayMs;
+        perf.debugOverlayMs += sample.debugOverlayMs;
+        perf.world.tickMs += sample.world.tickMs;
+        perf.world.tickCalls += sample.world.tickCalls;
+        perf.world.pathfindMs += sample.world.pathfindMs;
+        perf.world.pathfindCalls += sample.world.pathfindCalls;
+        perf.world.minePlanMs += sample.world.minePlanMs;
+        perf.world.minePlanCalls += sample.world.minePlanCalls;
+        perf.world.dropoffSearchMs += sample.world.dropoffSearchMs;
+        perf.world.dropoffSearchCalls += sample.world.dropoffSearchCalls;
+        perf.world.workerCount += sample.world.workerCount;
+        perf.world.movingWorkers += sample.world.movingWorkers;
+        perf.world.miningWorkers += sample.world.miningWorkers;
+
+        const sampleWindowMs = performance.now() - perf.sampleStartedAt;
+        if (sampleWindowMs < 1000) return;
+
+        const avgFrameMs = perf.totalFrameMs / Math.max(1, perf.frames);
+        const avgTickMs = perf.world.tickMs / Math.max(1, perf.world.tickCalls);
+        const avgPathfindMs = perf.world.pathfindMs / Math.max(1, perf.world.pathfindCalls);
+        const avgMinePlanMs = perf.world.minePlanMs / Math.max(1, perf.world.minePlanCalls);
+        const avgDropoffMs = perf.world.dropoffSearchMs / Math.max(1, perf.world.dropoffSearchCalls);
+        const avgWorkers = perf.world.workerCount / Math.max(1, perf.world.tickCalls);
+        const avgMoving = perf.world.movingWorkers / Math.max(1, perf.world.tickCalls);
+        const avgMining = perf.world.miningWorkers / Math.max(1, perf.world.tickCalls);
+
+        this.performanceDiagnostic.textContent = [
+            `frame avg ${avgFrameMs.toFixed(1)}ms  max ${perf.maxFrameMs.toFixed(1)}ms  fps ${(1000 / Math.max(1, avgFrameMs)).toFixed(1)}`,
+            `fixed ${perf.fixedUpdateMs.toFixed(1)}ms  steps ${perf.fixedSteps}  entity-ui ${perf.entityRefreshes}/${perf.entityRefreshMs.toFixed(1)}ms`,
+            `chunks ${perf.chunkEnsureMs.toFixed(1)}ms  flush ${perf.flushMs.toFixed(1)}ms  build ${perf.buildOverlayMs.toFixed(1)}ms`,
+            `world tick avg ${avgTickMs.toFixed(2)}ms x${perf.world.tickCalls}`,
+            `path avg ${avgPathfindMs.toFixed(2)}ms x${perf.world.pathfindCalls}  mine-plan avg ${avgMinePlanMs.toFixed(2)}ms x${perf.world.minePlanCalls}`,
+            `dropoff avg ${avgDropoffMs.toFixed(2)}ms x${perf.world.dropoffSearchCalls}`,
+            `workers avg ${avgWorkers.toFixed(1)}  moving ${avgMoving.toFixed(1)}  mining ${avgMining.toFixed(1)}`,
+        ].join('\n');
+
+        this.framePerfSample = {
+            sampleStartedAt: performance.now(),
+            frames: 0,
+            totalFrameMs: 0,
+            maxFrameMs: 0,
+            fixedUpdateMs: 0,
+            fixedSteps: 0,
+            entityRefreshes: 0,
+            entityRefreshMs: 0,
+            chunkEnsureMs: 0,
+            flushMs: 0,
+            holdMiningMs: 0,
+            popupMs: 0,
+            buildOverlayMs: 0,
+            debugOverlayMs: 0,
+            world: {
+                tickMs: 0,
+                tickCalls: 0,
+                pathfindMs: 0,
+                pathfindCalls: 0,
+                minePlanMs: 0,
+                minePlanCalls: 0,
+                dropoffSearchMs: 0,
+                dropoffSearchCalls: 0,
+                workerCount: 0,
+                movingWorkers: 0,
+                miningWorkers: 0,
+            },
+        };
+    }
+
+    private async copyPerformanceDiagnosticToClipboard(): Promise<void> {
+        const text = this.performanceDiagnostic.textContent?.trim();
+        if (!text) return;
+
+        try {
+            await navigator.clipboard.writeText(text);
+            this.showPerformanceDiagnosticCopyFeedback('perf copied');
+        } catch {
+            this.showPerformanceDiagnosticCopyFeedback('copy failed');
+        }
+    }
+
+    private showPerformanceDiagnosticCopyFeedback(message: string): void {
+        const previousText = this.performanceDiagnostic.textContent ?? '';
+        this.performanceDiagnostic.textContent = `${previousText}\n${message}`;
+        if (this.performanceDiagnosticCopyFeedbackTimeoutId != null) {
+            window.clearTimeout(this.performanceDiagnosticCopyFeedbackTimeoutId);
+        }
+        this.performanceDiagnosticCopyFeedbackTimeoutId = window.setTimeout(() => {
+            const currentText = this.performanceDiagnostic.textContent ?? '';
+            this.performanceDiagnostic.textContent = currentText.replace(`\n${message}`, '');
+            this.performanceDiagnosticCopyFeedbackTimeoutId = null;
+        }, 1000);
     }
 
     private onWheelZoom = (event: WheelEvent): void => {
