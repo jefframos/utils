@@ -1,9 +1,11 @@
 import type { WorldEntity, PlayerEntityCommandList, WorkerEntityCommandList } from '../world/WorldModel';
+import { getToolDefinition } from '../content/tools.ts';
 import { createContextMenuTemplate, type ContextMenuItem } from './ContextMenuTemplate';
 import { createQueuedCommandItem, type QueuedCommandGroup } from './QueuedCommandItem';
 
 type EntityFooterOptions = {
     onBuild?: () => void;
+    onOpenWorkers?: () => void;
     onDeploy?: () => void;
     onRecall?: () => void;
     onRemoveQueuedCommand?: (commandId: string) => void;
@@ -34,7 +36,14 @@ export function createEntityFooter(options: EntityFooterOptions): EntityFooter {
     const entityName = document.createElement('div');
     entityName.className = 'entity-footer-name';
 
-    entityInfo.append(entityIcon, entityName);
+    const entityToolStats = document.createElement('div');
+    entityToolStats.className = 'entity-footer-tool-stats';
+
+    const entityText = document.createElement('div');
+    entityText.className = 'entity-footer-text';
+    entityText.append(entityName, entityToolStats);
+
+    entityInfo.append(entityIcon, entityText);
 
     // Actions section (middle)
     const actionsSection = document.createElement('div');
@@ -77,6 +86,16 @@ export function createEntityFooter(options: EntityFooterOptions): EntityFooter {
         if (entity.kind === 'player') return '👤';
         if (entity.kind === 'worker') return '🔧';
         return '❓';
+    };
+
+    const getToolStatsLabel = (entity: WorldEntity): string => {
+        if (!entity.toolId) return 'Tool: none';
+        const tool = getToolDefinition(entity.toolId);
+        if (!tool) return `Tool: ${entity.toolId}`;
+        const modeDetail = tool.damageMode === 'blunt'
+            ? `blunt r=${tool.bluntRadius}`
+            : 'precise';
+        return `Tool: ${tool.name} | dmg ${tool.tileDamage} | ${tool.hitsPerSecond.toFixed(1)}/s | ${modeDetail}`;
     };
 
     const getQueuedCommandGroups = (entity: WorldEntity): QueuedCommandGroup[] => {
@@ -300,6 +319,11 @@ export function createEntityFooter(options: EntityFooterOptions): EntityFooter {
                 onClick: () => options.onBuild?.(),
                 hidden: !entity.builder?.buildables.length,
             });
+        } else if (entity.kind === 'base') {
+            buttons.push({
+                label: 'Workers',
+                onClick: () => options.onOpenWorkers?.(),
+            });
         } else if (entity.kind === 'worker') {
             buttons.push({
                 label: entity.deployed ? 'Recall' : 'Deploy',
@@ -409,6 +433,7 @@ export function createEntityFooter(options: EntityFooterOptions): EntityFooter {
             // Update entity info
             entityIcon.textContent = getEntityIcon(entity);
             entityName.textContent = getEntityLabel(entity);
+            entityToolStats.textContent = getToolStatsLabel(entity);
 
             // Render actions and queue
             renderActions(entity);

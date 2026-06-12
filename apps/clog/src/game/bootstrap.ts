@@ -1078,6 +1078,7 @@ export async function bootstrapGame(): Promise<void> {
                 no_deploy_space: 'no clear tile near station for deployment',
                 invalid_target: 'target tile is invalid or occupied',
                 path_blocked: 'worker cannot reach that location',
+                capacity_reached: 'station population slots are full',
             }[event.reason];
             panel.setStatus(`Worker action failed: ${reasonText}.`);
         }

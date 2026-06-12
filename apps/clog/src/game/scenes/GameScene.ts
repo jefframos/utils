@@ -17,9 +17,16 @@ import { createContextMenuTemplate } from '../ui/ContextMenuTemplate';
 import { createEntityDetailsWindow, type EntityInventoryAdapter } from '../ui/EntityDetailsWindow';
 import { createEntityFooter, type EntityFooter } from '../ui/EntityFooter';
 import { createBuildPanel, type BuildPanel, type BuildPanelMeta } from '../ui/BuildPanel';
+import { createWorkersWindow, type WorkersWindow } from '../ui/WorkersWindow';
 import type { BuildableEntityType } from '../content/buildables';
 import { getEntityLabel } from '../content/entities.ts';
 import { addInventoryItem, getInventoryItemDefinition, normalizeInventoryId } from '../inventory/InventoryModel';
+
+type JsHeapMemorySample = {
+    usedJSHeapSize: number;
+    totalJSHeapSize: number;
+    jsHeapSizeLimit: number;
+};
 
 export class GameScene {
     private static damagePopupFontInstalled = false;
@@ -51,6 +58,7 @@ export class GameScene {
     private readonly worldContextMenu = createContextMenuTemplate();
     private readonly entityDetails: ReturnType<typeof createEntityDetailsWindow>;
     private readonly entityFooter: EntityFooter;
+    private readonly workersWindow: WorkersWindow;
     private selectedEntityId: string | null = null;
     private fixedUpdateAccumulatorMs = 0;
     private readonly onWorkerOreDelivered: (amount: number) => void;
@@ -88,16 +96,28 @@ export class GameScene {
         world: {
             tickMs: 0,
             tickCalls: 0,
+            tickMaxMs: 0,
             pathfindMs: 0,
             pathfindCalls: 0,
             minePlanMs: 0,
             minePlanCalls: 0,
+            minePlanMaxMs: 0,
             dropoffSearchMs: 0,
             dropoffSearchCalls: 0,
             workerCount: 0,
             movingWorkers: 0,
             miningWorkers: 0,
+            queuedWorkerCommands: 0,
+            workersWithQueuedCommands: 0,
+            workersInRetryCooldown: 0,
+            workersPaused: 0,
+            idleWorkers: 0,
+            mineReservations: 0,
         } as WorldPerformanceSnapshot,
+        heapUsedBytes: 0,
+        heapTotalBytes: 0,
+        heapLimitBytes: 0,
+        heapSamples: 0,
     };
 
     constructor(
@@ -201,6 +221,11 @@ export class GameScene {
                     this.enterBuildMode(entity.id);
                 }
             },
+            onOpenWorkers: () => {
+                const entity = this.selectedEntityId ? this.world.getEntityById(this.selectedEntityId) : null;
+                if (!entity || entity.kind !== 'base') return;
+                this.workersWindow.openForBase(entity);
+            },
             onDeploy: () => {
                 const entity = this.selectedEntityId ? this.world.getEntityById(this.selectedEntityId) : null;
                 if (entity) {
@@ -252,6 +277,23 @@ export class GameScene {
                     this.transport.send({ type: 'ClearWorkerCommands', workerId: entity.id });
                 }
             },
+        });
+
+        this.workersWindow = createWorkersWindow({
+            onSpawnUnit: (buildingId, unitType) => {
+                this.transport.send({ type: 'SpawnUnit', buildingId, unitType });
+            },
+            onDeployWorker: (workerId) => {
+                this.transport.send({ type: 'DeployWorker', workerId });
+            },
+            onRecallWorker: (workerId) => {
+                this.transport.send({ type: 'RecallWorker', workerId });
+            },
+            onRecallAllWorkers: (buildingId) => {
+                this.transport.send({ type: 'RecallWorkers', buildingId });
+            },
+            getWorkersForBuilding: (buildingId) => this.world.getWorkersForBuilding(buildingId),
+            getBaseSlotSummary: (buildingId) => this.world.getBaseSlotSummary(buildingId),
         });
 
         // Create tile tooltip
@@ -423,16 +465,20 @@ export class GameScene {
                 }
             } else if (event.type === 'WorkerActionFailed' || event.type === 'WorkerSpawned' || event.type === 'WorkerDeployed' || event.type === 'WorkerRecalled' || event.type === 'WorkersRecalled' || event.type === 'WorkerMoved' || event.type === 'WorkerMiningStarted') {
                 this.refreshSelectedEntityDetails();
+                this.workersWindow.refresh();
             } else if (event.type === 'WorkerCommandInterrupted' || event.type === 'WorkerCommandsCleared' || event.type === 'WorkerQueuedCommandRemoved') {
                 this.refreshSelectedEntityDetails();
+                this.workersWindow.refresh();
             } else if (event.type === 'WorkerCommandsPaused' || event.type === 'WorkerCommandsResumed') {
                 this.refreshSelectedEntityDetails();
+                this.workersWindow.refresh();
             } else if (event.type === 'PlayerCommandInterrupted' || event.type === 'PlayerCommandsCleared' || event.type === 'PlayerQueuedCommandRemoved' || event.type === 'PlayerCommandsPaused' || event.type === 'PlayerCommandsResumed') {
                 this.refreshSelectedEntityDetails();
             } else if (event.type === 'PlayerMoved' || event.type === 'PlayerMiningStarted') {
                 this.refreshSelectedEntityDetails();
             } else if (event.type === 'WorldGenerated') {
                 this.clearEntitySelection();
+                this.workersWindow.close();
             }
         });
     }
@@ -635,19 +681,18 @@ export class GameScene {
     }
 
     private updateHoldMining(deltaMs: number): void {
-        // Hold mining disabled - only entities can destroy tiles now
-        // if (this.isPrimaryMining) {
-        //     const primary = this.getPrimaryTool();
-        //     if (primary.hitOnHold && primary.hitsPerSecond > 0) {
-        //         this.onToolSelected(primary.id);
-        //         this.primaryHoldMineCooldownMs -= deltaMs;
-        //         const primaryIntervalMs = 1000 / primary.hitsPerSecond;
-        //         while (this.primaryHoldMineCooldownMs <= 0) {
-        //             this.mineAtPointer(this.primaryMiningPointer, 'hold');
-        //             this.primaryHoldMineCooldownMs += primaryIntervalMs;
-        //         }
-        //     }
-        // }
+        if (this.isPrimaryMining) {
+            const primary = this.getPrimaryTool();
+            if (primary.hitOnHold && primary.hitsPerSecond > 0) {
+                this.onToolSelected(primary.id);
+                this.primaryHoldMineCooldownMs -= deltaMs;
+                const primaryIntervalMs = 1000 / primary.hitsPerSecond;
+                while (this.primaryHoldMineCooldownMs <= 0) {
+                    this.mineAtPointer(this.primaryMiningPointer, 'hold');
+                    this.primaryHoldMineCooldownMs += primaryIntervalMs;
+                }
+            }
+        }
     }
 
     private spawnDamagePopups(hits: TileDamageHit[]): void {
@@ -1077,15 +1122,31 @@ export class GameScene {
         perf.debugOverlayMs += sample.debugOverlayMs;
         perf.world.tickMs += sample.world.tickMs;
         perf.world.tickCalls += sample.world.tickCalls;
+        perf.world.tickMaxMs = Math.max(perf.world.tickMaxMs, sample.world.tickMaxMs);
         perf.world.pathfindMs += sample.world.pathfindMs;
         perf.world.pathfindCalls += sample.world.pathfindCalls;
         perf.world.minePlanMs += sample.world.minePlanMs;
         perf.world.minePlanCalls += sample.world.minePlanCalls;
+        perf.world.minePlanMaxMs = Math.max(perf.world.minePlanMaxMs, sample.world.minePlanMaxMs);
         perf.world.dropoffSearchMs += sample.world.dropoffSearchMs;
         perf.world.dropoffSearchCalls += sample.world.dropoffSearchCalls;
         perf.world.workerCount += sample.world.workerCount;
         perf.world.movingWorkers += sample.world.movingWorkers;
         perf.world.miningWorkers += sample.world.miningWorkers;
+        perf.world.queuedWorkerCommands += sample.world.queuedWorkerCommands;
+        perf.world.workersWithQueuedCommands += sample.world.workersWithQueuedCommands;
+        perf.world.workersInRetryCooldown += sample.world.workersInRetryCooldown;
+        perf.world.workersPaused += sample.world.workersPaused;
+        perf.world.idleWorkers += sample.world.idleWorkers;
+        perf.world.mineReservations += sample.world.mineReservations;
+
+        const memorySample = this.readJsHeapMemorySample();
+        if (memorySample) {
+            perf.heapUsedBytes += memorySample.usedJSHeapSize;
+            perf.heapTotalBytes += memorySample.totalJSHeapSize;
+            perf.heapLimitBytes += memorySample.jsHeapSizeLimit;
+            perf.heapSamples += 1;
+        }
 
         const sampleWindowMs = performance.now() - perf.sampleStartedAt;
         if (sampleWindowMs < 1000) return;
@@ -1098,16 +1159,36 @@ export class GameScene {
         const avgWorkers = perf.world.workerCount / Math.max(1, perf.world.tickCalls);
         const avgMoving = perf.world.movingWorkers / Math.max(1, perf.world.tickCalls);
         const avgMining = perf.world.miningWorkers / Math.max(1, perf.world.tickCalls);
+        const avgQueuedCommands = perf.world.queuedWorkerCommands / Math.max(1, perf.world.tickCalls);
+        const avgQueuedWorkers = perf.world.workersWithQueuedCommands / Math.max(1, perf.world.tickCalls);
+        const avgRetryCooldownWorkers = perf.world.workersInRetryCooldown / Math.max(1, perf.world.tickCalls);
+        const avgPausedWorkers = perf.world.workersPaused / Math.max(1, perf.world.tickCalls);
+        const avgIdleWorkers = perf.world.idleWorkers / Math.max(1, perf.world.tickCalls);
+        const avgMineReservations = perf.world.mineReservations / Math.max(1, perf.world.tickCalls);
+        const hasHeapSamples = perf.heapSamples > 0;
+        const avgHeapUsedMB = hasHeapSamples ? (perf.heapUsedBytes / perf.heapSamples) / (1024 * 1024) : 0;
+        const avgHeapTotalMB = hasHeapSamples ? (perf.heapTotalBytes / perf.heapSamples) / (1024 * 1024) : 0;
+        const avgHeapLimitMB = hasHeapSamples ? (perf.heapLimitBytes / perf.heapSamples) / (1024 * 1024) : 0;
 
-        this.performanceDiagnostic.textContent = [
-            `frame avg ${avgFrameMs.toFixed(1)}ms  max ${perf.maxFrameMs.toFixed(1)}ms  fps ${(1000 / Math.max(1, avgFrameMs)).toFixed(1)}`,
+        const diagnosticLines = [
+            `frame avg ${avgFrameMs.toFixed(1)}ms  max ${perf.maxFrameMs.toFixed(1)}ms  fps ${(avgFrameMs > 0 ? 1000 / avgFrameMs : 0).toFixed(1)}`,
             `fixed ${perf.fixedUpdateMs.toFixed(1)}ms  steps ${perf.fixedSteps}  entity-ui ${perf.entityRefreshes}/${perf.entityRefreshMs.toFixed(1)}ms`,
             `chunks ${perf.chunkEnsureMs.toFixed(1)}ms  flush ${perf.flushMs.toFixed(1)}ms  build ${perf.buildOverlayMs.toFixed(1)}ms`,
-            `world tick avg ${avgTickMs.toFixed(2)}ms x${perf.world.tickCalls}`,
-            `path avg ${avgPathfindMs.toFixed(2)}ms x${perf.world.pathfindCalls}  mine-plan avg ${avgMinePlanMs.toFixed(2)}ms x${perf.world.minePlanCalls}`,
+            `world tick avg ${avgTickMs.toFixed(2)}ms max ${perf.world.tickMaxMs.toFixed(2)}ms x${perf.world.tickCalls}`,
+            `path avg ${avgPathfindMs.toFixed(2)}ms x${perf.world.pathfindCalls}  mine-plan avg ${avgMinePlanMs.toFixed(2)}ms max ${perf.world.minePlanMaxMs.toFixed(2)}ms x${perf.world.minePlanCalls}`,
             `dropoff avg ${avgDropoffMs.toFixed(2)}ms x${perf.world.dropoffSearchCalls}`,
             `workers avg ${avgWorkers.toFixed(1)}  moving ${avgMoving.toFixed(1)}  mining ${avgMining.toFixed(1)}`,
-        ].join('\n');
+            `queue avg ${avgQueuedCommands.toFixed(1)}  queued-workers ${avgQueuedWorkers.toFixed(1)}  idle ${avgIdleWorkers.toFixed(1)}`,
+            `cooldown ${avgRetryCooldownWorkers.toFixed(1)}  paused ${avgPausedWorkers.toFixed(1)}  reservations ${avgMineReservations.toFixed(1)}`,
+        ];
+
+        if (hasHeapSamples) {
+            diagnosticLines.push(`heap ${avgHeapUsedMB.toFixed(1)}/${avgHeapTotalMB.toFixed(1)}MB  limit ${avgHeapLimitMB.toFixed(0)}MB`);
+        } else {
+            diagnosticLines.push('heap n/a (browser API unavailable)');
+        }
+
+        this.performanceDiagnostic.textContent = diagnosticLines.join('\n');
 
         this.framePerfSample = {
             sampleStartedAt: performance.now(),
@@ -1127,17 +1208,35 @@ export class GameScene {
             world: {
                 tickMs: 0,
                 tickCalls: 0,
+                tickMaxMs: 0,
                 pathfindMs: 0,
                 pathfindCalls: 0,
                 minePlanMs: 0,
                 minePlanCalls: 0,
+                minePlanMaxMs: 0,
                 dropoffSearchMs: 0,
                 dropoffSearchCalls: 0,
                 workerCount: 0,
                 movingWorkers: 0,
                 miningWorkers: 0,
+                queuedWorkerCommands: 0,
+                workersWithQueuedCommands: 0,
+                workersInRetryCooldown: 0,
+                workersPaused: 0,
+                idleWorkers: 0,
+                mineReservations: 0,
             },
+            heapUsedBytes: 0,
+            heapTotalBytes: 0,
+            heapLimitBytes: 0,
+            heapSamples: 0,
         };
+    }
+
+    private readJsHeapMemorySample(): JsHeapMemorySample | null {
+        const perf = performance as Performance & { memory?: JsHeapMemorySample };
+        if (!perf.memory) return null;
+        return perf.memory;
     }
 
     private async copyPerformanceDiagnosticToClipboard(): Promise<void> {

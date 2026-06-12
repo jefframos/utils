@@ -115,6 +115,8 @@ export class ScanNearestBehavior {
         const originY = Math.round(context.lastMinedY);
         const workerX = Math.round(context.workerX);
         const workerY = Math.round(context.workerY);
+        const baseX = Math.round(context.baseX);
+        const baseY = Math.round(context.baseY);
         const maxRadius = Math.max(1, this.config.reseedScanRadius);
 
         let best: { x: number; y: number; score: number } | null = null;
@@ -128,7 +130,7 @@ export class ScanNearestBehavior {
                 if (!context.canTargetTile(x, y)) continue;
 
                 const neighbors = context.countSolidNeighbors(x, y);
-                const distToBase = Math.abs(x - Math.round(context.baseX)) + Math.abs(y - Math.round(context.baseY));
+                const distToBase = Math.abs(x - baseX) + Math.abs(y - baseY);
                 const distToWorker = Math.abs(x - workerX) + Math.abs(y - workerY);
                 const sparsePenalty = neighbors <= 1 ? 120 : 0;
                 const score = distToWorker * 1.4 + distToOrigin * 0.6 + distToBase * 0.25 + sparsePenalty - neighbors * 2;
@@ -153,18 +155,38 @@ export class ScanNearestBehavior {
     ): Omit<ScanNearestPlan, 'anchorX' | 'anchorY'> | null {
         const startX = Math.round(anchorX);
         const startY = Math.round(anchorY);
+        const baseX = Math.round(context.baseX);
+        const baseY = Math.round(context.baseY);
+        const lastX = Math.round(context.lastMinedX);
+        const lastY = Math.round(context.lastMinedY);
         const queue: Array<GridPoint> = this.getAnchorOpenSeeds(context, startX, startY, areaRadius);
         if (queue.length === 0) return null;
         const previous = new Map<string, string | null>();
         for (const seed of queue) {
             previous.set(`${seed.x},${seed.y}`, null);
         }
+        const maxApproachDistance = areaRadius + 1;
+
+        // Cache worker->approach path checks for this planning pass to avoid
+        // recomputing the same path for multiple adjacent candidate targets.
+        const approachPathCache = new Map<string, Array<GridPoint> | null>();
+        const getApproachPath = (approachX: number, approachY: number): Array<GridPoint> | null => {
+            const key = `${approachX},${approachY}`;
+            const cached = approachPathCache.get(key);
+            if (cached !== undefined) {
+                return cached;
+            }
+            const path = context.buildPath(workerX, workerY, approachX, approachY);
+            approachPathCache.set(key, path);
+            return path;
+        };
 
         let bestDense: Candidate | null = null;
         let bestFallback: Candidate | null = null;
 
-        while (queue.length > 0) {
-            const current = queue.shift();
+        let cursor = 0;
+        while (cursor < queue.length) {
+            const current = queue[cursor++];
             if (!current) continue;
 
             for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
@@ -175,22 +197,26 @@ export class ScanNearestBehavior {
                     const distToAnchor = Math.abs(nx - startX) + Math.abs(ny - startY);
                     if (distToAnchor > areaRadius) continue;
 
-                    const lastX = Math.round(context.lastMinedX);
-                    const lastY = Math.round(context.lastMinedY);
                     const distToLastMined = Math.abs(nx - lastX) + Math.abs(ny - lastY);
                     if (enforceChainRadius && distToLastMined > Math.max(1, this.config.maxStepFromLastMined)) continue;
 
-                    const path = context.buildPath(workerX, workerY, current.x, current.y);
-                    if (!path) continue;
-
                     const neighbors = context.countSolidNeighbors(nx, ny);
-                    const distToBase = Math.abs(nx - Math.round(context.baseX)) + Math.abs(ny - Math.round(context.baseY));
+                    const distToBase = Math.abs(nx - baseX) + Math.abs(ny - baseY);
                     const distToWorker = Math.abs(nx - workerX) + Math.abs(ny - workerY);
                     const approachOffset = Math.abs(current.x - startX) + Math.abs(current.y - startY);
                     const sparsePenalty = neighbors <= 1 ? 300 : neighbors === 2 ? 35 : 0;
                     const score = enforceChainRadius
                         ? distToLastMined * 8 + distToAnchor * 1.2 + approachOffset * 0.25 + distToBase * 0.3 + sparsePenalty
                         : distToAnchor * 4.5 + distToWorker * 1.6 + approachOffset * 0.25 + distToBase * 0.35 + sparsePenalty;
+
+                    const competesDense = neighbors >= this.config.minDenseNeighbors;
+                    const currentBestScore = competesDense
+                        ? (bestDense?.score ?? Number.POSITIVE_INFINITY)
+                        : (bestFallback?.score ?? Number.POSITIVE_INFINITY);
+                    if (score >= currentBestScore) continue;
+
+                    const path = getApproachPath(current.x, current.y);
+                    if (!path) continue;
 
                     const candidate: Candidate = {
                         targetX: nx,
@@ -212,6 +238,8 @@ export class ScanNearestBehavior {
                 }
 
                 if (!context.isOpenTile(nx, ny)) continue;
+                const distToAnchorForApproach = Math.abs(nx - startX) + Math.abs(ny - startY);
+                if (distToAnchorForApproach > maxApproachDistance) continue;
                 const key = `${nx},${ny}`;
                 if (previous.has(key)) continue;
                 previous.set(key, `${current.x},${current.y}`);
@@ -222,7 +250,7 @@ export class ScanNearestBehavior {
         const selected = bestDense ?? bestFallback;
         if (!selected) return null;
 
-        const selectedPath = context.buildPath(workerX, workerY, selected.approachX, selected.approachY);
+        const selectedPath = getApproachPath(selected.approachX, selected.approachY);
         if (!selectedPath) return null;
 
         return {

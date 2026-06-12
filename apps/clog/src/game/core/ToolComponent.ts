@@ -3,18 +3,18 @@ import { DEFAULT_TOOL, TOOL_DEFINITIONS, type ToolDefinition } from '../content/
 export type { ToolDefinition } from '../content/tools.ts';
 
 export class ToolComponent {
-    private activeTool: ToolDefinition;
+    private activeToolId: string;
 
     constructor(initialTool: ToolDefinition = DEFAULT_TOOL) {
-        this.activeTool = initialTool;
+        this.activeToolId = initialTool.id;
     }
 
     getActiveTool(): ToolDefinition {
-        return this.activeTool;
+        return TOOL_DEFINITIONS.find((entry) => entry.id === this.activeToolId) ?? DEFAULT_TOOL;
     }
 
     setActiveTool(tool: ToolDefinition): void {
-        this.activeTool = tool;
+        this.activeToolId = tool.id;
     }
 
     getAllTools(): ToolDefinition[] {

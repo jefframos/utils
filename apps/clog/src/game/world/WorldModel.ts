@@ -152,7 +152,7 @@ export type RemoveBeaconResult =
 
 export type WorkerActionResult =
     | { ok: true; worker: WorldEntity }
-    | { ok: false; reason: 'not_found' | 'not_worker' | 'invalid_building' | 'already_deployed' | 'already_recalled' | 'no_deploy_space' | 'invalid_target' | 'path_blocked' };
+    | { ok: false; reason: 'not_found' | 'not_worker' | 'invalid_building' | 'already_deployed' | 'already_recalled' | 'no_deploy_space' | 'invalid_target' | 'path_blocked' | 'capacity_reached' };
 
 export type PlayerActionResult =
     | { ok: true; player: WorldEntity }
@@ -212,6 +212,7 @@ type WorldRules = {
 
 const BASE_ENTITY_ID = 'entity-base';
 const MAIN_PLAYER_ENTITY_ID = 'entity-player-main';
+const BASE_ENTITY_CAPACITY = 8;
 const BASE_VISIBILITY_RADIUS = 7;
 const PLAYER_VISIBILITY_RADIUS = 14;
 const PLAYER_MOVE_SPEED_TILES_PER_SECOND = 2.5;
@@ -226,15 +227,31 @@ type BeaconNode = SavedBeacon;
 export type WorldPerformanceSnapshot = {
     tickMs: number;
     tickCalls: number;
+    tickMaxMs: number;
     pathfindMs: number;
     pathfindCalls: number;
     minePlanMs: number;
     minePlanCalls: number;
+    minePlanMaxMs: number;
     dropoffSearchMs: number;
     dropoffSearchCalls: number;
     workerCount: number;
     movingWorkers: number;
     miningWorkers: number;
+    queuedWorkerCommands: number;
+    workersWithQueuedCommands: number;
+    workersInRetryCooldown: number;
+    workersPaused: number;
+    idleWorkers: number;
+    mineReservations: number;
+};
+
+export type BaseSlotSummary = {
+    capacity: number;
+    used: number;
+    available: number;
+    heroReserved: number;
+    workersAssigned: number;
 };
 
 export class WorldModel {
@@ -266,15 +283,23 @@ export class WorldModel {
     private performanceStats: WorldPerformanceSnapshot = {
         tickMs: 0,
         tickCalls: 0,
+        tickMaxMs: 0,
         pathfindMs: 0,
         pathfindCalls: 0,
         minePlanMs: 0,
         minePlanCalls: 0,
+        minePlanMaxMs: 0,
         dropoffSearchMs: 0,
         dropoffSearchCalls: 0,
         workerCount: 0,
         movingWorkers: 0,
         miningWorkers: 0,
+        queuedWorkerCommands: 0,
+        workersWithQueuedCommands: 0,
+        workersInRetryCooldown: 0,
+        workersPaused: 0,
+        idleWorkers: 0,
+        mineReservations: 0,
     };
     private baseXValue = BASE_START_X;
     private baseYValue = BASE_START_Y;
@@ -377,6 +402,24 @@ export class WorldModel {
         return Array.from(this.entities.values())
             .filter((entity) => entity.kind === 'worker' && entity.homeId === buildingId)
             .sort((left, right) => left.id.localeCompare(right.id));
+    }
+
+    getBaseSlotSummary(buildingId: string): BaseSlotSummary | null {
+        const building = this.entities.get(buildingId);
+        if (!building || building.kind !== 'base') return null;
+
+        const workersAssigned = this.getWorkersForBuilding(buildingId).length;
+        const heroReserved = this.getMainPlayerEntity() ? 1 : 0;
+        const used = workersAssigned + heroReserved;
+        const available = Math.max(0, BASE_ENTITY_CAPACITY - used);
+
+        return {
+            capacity: BASE_ENTITY_CAPACITY,
+            used,
+            available,
+            heroReserved,
+            workersAssigned,
+        };
     }
 
     toSnapshot(): WorldSnapshot {
@@ -568,15 +611,23 @@ export class WorldModel {
         this.performanceStats = {
             tickMs: 0,
             tickCalls: 0,
+            tickMaxMs: 0,
             pathfindMs: 0,
             pathfindCalls: 0,
             minePlanMs: 0,
             minePlanCalls: 0,
+            minePlanMaxMs: 0,
             dropoffSearchMs: 0,
             dropoffSearchCalls: 0,
             workerCount: 0,
             movingWorkers: 0,
             miningWorkers: 0,
+            queuedWorkerCommands: 0,
+            workersWithQueuedCommands: 0,
+            workersInRetryCooldown: 0,
+            workersPaused: 0,
+            idleWorkers: 0,
+            mineReservations: 0,
         };
         return snapshot;
     }
@@ -726,6 +777,11 @@ export class WorldModel {
         }
         if (building.kind !== 'base') {
             return { ok: false, reason: 'invalid_building' };
+        }
+
+        const slotSummary = this.getBaseSlotSummary(buildingId);
+        if (!slotSummary || slotSummary.available <= 0) {
+            return { ok: false, reason: 'capacity_reached' };
         }
 
         const definition = getWorkerDefinition(unitType);
@@ -1151,6 +1207,11 @@ export class WorldModel {
         let workerCount = 0;
         let movingWorkers = 0;
         let miningWorkers = 0;
+        let queuedWorkerCommands = 0;
+        let workersWithQueuedCommands = 0;
+        let workersInRetryCooldown = 0;
+        let workersPaused = 0;
+        let idleWorkers = 0;
         for (const entity of this.entities.values()) {
             if (entity.kind !== 'worker') continue;
             workerCount++;
@@ -1350,7 +1411,7 @@ export class WorldModel {
                                 const toolCadenceMs = Math.max(60, Math.round(1000 / Math.max(0.1, tool.hitsPerSecond)));
                                 const workerCadenceMs = Math.max(0, Math.round(entity.mineCooldownMs ?? 0));
                                 entity.mining.cooldownMs = workerCadenceMs > 0
-                                    ? Math.min(workerCadenceMs, toolCadenceMs)
+                                    ? Math.max(workerCadenceMs, toolCadenceMs)
                                     : toolCadenceMs;
                                 entity.mining.miningProgressMs += deltaMs;
 
@@ -1443,11 +1504,39 @@ export class WorldModel {
                 this.applyWorkerVisibility(entity);
                 this.markChunkDirtyAt(Math.floor(entity.x), Math.floor(entity.y));
             }
+
+            const commandState = entity.commandList;
+            const queuedCommands = commandState?.queue.length ?? 0;
+            queuedWorkerCommands += queuedCommands;
+            if (queuedCommands > 0) {
+                workersWithQueuedCommands++;
+            }
+            if ((entity.commandRetryCooldownMs ?? 0) > 0) {
+                workersInRetryCooldown++;
+            }
+            if (entity.commandsPaused) {
+                workersPaused++;
+            }
+            const hasCurrentCommand = !!commandState?.current;
+            const isIdle = !entity.commandsPaused
+                && !entity.movement
+                && !entity.mining
+                && queuedCommands === 0
+                && !hasCurrentCommand;
+            if (isIdle) {
+                idleWorkers++;
+            }
         }
 
         this.performanceStats.workerCount += workerCount;
         this.performanceStats.movingWorkers += movingWorkers;
         this.performanceStats.miningWorkers += miningWorkers;
+        this.performanceStats.queuedWorkerCommands += queuedWorkerCommands;
+        this.performanceStats.workersWithQueuedCommands += workersWithQueuedCommands;
+        this.performanceStats.workersInRetryCooldown += workersInRetryCooldown;
+        this.performanceStats.workersPaused += workersPaused;
+        this.performanceStats.idleWorkers += idleWorkers;
+        this.performanceStats.mineReservations += this.mineReservations.size;
 
         const player = this.getMainPlayerEntity();
         if (player) {
@@ -1572,7 +1661,7 @@ export class WorldModel {
                             this.pendingWorkerDamageHits.push(hit);
                             const toolCadenceMs = Math.max(60, Math.round(1000 / Math.max(0.1, tool.hitsPerSecond)));
                             const entityCadenceMs = Math.max(0, Math.round(player.mineCooldownMs ?? 0));
-                            mining.cooldownMs = entityCadenceMs > 0 ? Math.min(entityCadenceMs, toolCadenceMs) : toolCadenceMs;
+                            mining.cooldownMs = entityCadenceMs > 0 ? Math.max(entityCadenceMs, toolCadenceMs) : toolCadenceMs;
                             mining.miningProgressMs += deltaMs;
 
                             const remainingCapacity = Math.max(0, totalCapacity - mining.carriedOre);
@@ -1602,8 +1691,6 @@ export class WorldModel {
                                     }
                                 }
 
-                                this.performanceStats.tickMs += performance.now() - tickStart;
-                                this.performanceStats.tickCalls += 1;
                             }
 
                             if (hit.opened) {
@@ -1659,6 +1746,11 @@ export class WorldModel {
                 this.markChunkDirtyAt(Math.floor(player.x), Math.floor(player.y));
             }
         }
+
+        const tickDurationMs = performance.now() - tickStart;
+        this.performanceStats.tickMs += tickDurationMs;
+        this.performanceStats.tickMaxMs = Math.max(this.performanceStats.tickMaxMs, tickDurationMs);
+        this.performanceStats.tickCalls += 1;
     }
 
     getDirtyChunkKeys(): string[] {
@@ -3095,7 +3187,9 @@ export class WorldModel {
             countSolidNeighbors: (x, y) => this.countSolidNeighbors(x, y),
             buildPath: (fromX, fromY, toX, toY) => this.findOpenPath(fromX, fromY, toX, toY, 25000, worker.sizeDef),
         });
-        this.performanceStats.minePlanMs += performance.now() - perfStart;
+        const minePlanDurationMs = performance.now() - perfStart;
+        this.performanceStats.minePlanMs += minePlanDurationMs;
+        this.performanceStats.minePlanMaxMs = Math.max(this.performanceStats.minePlanMaxMs, minePlanDurationMs);
         this.performanceStats.minePlanCalls += 1;
         return plan;
     }

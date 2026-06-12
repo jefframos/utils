@@ -578,9 +578,9 @@ export function createEntityDetailsWindow(options: EntityDetailsWindowOptions): 
             }
 
             if (entity.kind === 'base') {
-                baseWorkersSection.hidden = false;
+                baseWorkersSection.hidden = true;
                 workerCommandsSection.hidden = true;
-                renderBaseWorkers(entity);
+                workersGrid.textContent = '';
             } else if (entity.kind === 'worker') {
                 baseWorkersSection.hidden = true;
                 workerCommandsSection.hidden = false;

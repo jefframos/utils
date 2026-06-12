@@ -102,7 +102,7 @@ export class MiningSystem {
         const toolCadenceMs = Math.max(60, Math.round(1000 / Math.max(0.1, tool.hitsPerSecond)));
         const workerCadenceMs = Math.max(0, Math.round(entity.mineCooldownMs ?? 0));
         mining.cooldownMs = workerCadenceMs > 0
-            ? Math.min(workerCadenceMs, toolCadenceMs)
+            ? Math.max(workerCadenceMs, toolCadenceMs)
             : toolCadenceMs;
         mining.miningProgressMs += deltaMs;
 

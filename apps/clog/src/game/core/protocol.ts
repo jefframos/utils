@@ -313,7 +313,7 @@ export type WorkerActionFailedEvent = {
     type: 'WorkerActionFailed';
     action: 'spawn' | 'deploy' | 'recall' | 'recall_all' | 'move' | 'mine' | 'interrupt' | 'clear_commands' | 'remove_queued' | 'pause' | 'resume';
     id: string;
-    reason: 'not_found' | 'not_worker' | 'invalid_building' | 'already_deployed' | 'already_recalled' | 'no_deploy_space' | 'invalid_target' | 'path_blocked';
+    reason: 'not_found' | 'not_worker' | 'invalid_building' | 'already_deployed' | 'already_recalled' | 'no_deploy_space' | 'invalid_target' | 'path_blocked' | 'capacity_reached';
 };
 
 export type GameEvent =

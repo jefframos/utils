@@ -1338,6 +1338,37 @@ canvas {
   word-break: break-word;
 }
 
+.workers-window {
+  min-width: 340px;
+  min-height: 280px;
+}
+
+.workers-window .floating-window-content {
+  overflow: auto;
+}
+
+.workers-window-panel {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+}
+
+.workers-window-summary {
+  margin: 0;
+  font-size: 11px;
+  color: #2f2f2f;
+}
+
+.workers-window-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.workers-window-actions .entity-details-action-btn {
+  flex: 1 1 140px;
+}
+
 .inventory-item-details-attrs dt,
 .inventory-item-details-attrs dd {
   margin: 0;
@@ -1618,12 +1649,28 @@ canvas {
   justify-content: center;
 }
 
+.entity-footer-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
 .entity-footer-name {
   font-weight: 700;
   font-size: 12px;
   color: #000000;
   line-height: 1.2;
   flex: 1;
+}
+
+.entity-footer-tool-stats {
+  font-size: 10px;
+  color: #2f2f2f;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.2;
 }
 
 /* Actions section (middle) */
